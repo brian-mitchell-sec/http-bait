@@ -1,0 +1,72 @@
+# Standalone stack for the http-bait honeypot: own containers, own network,
+# own volumes, nothing shared with anything else you run.
+#
+# Binds host 80/443 directly, so it cannot share a host with another service
+# already holding those ports. Either give it its own box (the default, and
+# what DEPLOY.md assumes), or drop a new site block into your existing Caddy
+# config and don't run this stack's caddy service.
+services:
+  caddy:
+    build: ./caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    depends_on:
+      - app
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      - HB_LOG_DIR=/data/logs
+      - HB_CANARY_BASE=https://http-bait.example.com
+      # Opt-in: mints a REAL, functioning AWS canary key via canarytokens.org
+      # (see main.py's "Live canarytokens.org integration" section) instead of
+      # a purely synthetic aws_pair. Off by default — uncomment to enable; this
+      # is the one outbound call this service makes to a third party.
+      # - HB_CANARYTOKENS_LIVE=1
+      # - HB_CANARYTOKENS_REFRESH_SECS=86400
+    volumes:
+      - ./data:/data
+    expose:
+      - "8100"
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    # /healthz reports whether telemetry is still being WRITTEN, not just
+    # whether the process answers — a full disk makes the writer fail without
+    # raising, which previously looked identical to a healthy service.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8100/healthz',timeout=5).status==200 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    # Without this, the app's own stderr is an unbounded second disk consumer —
+    # and it grows fastest exactly when writes are already failing.
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    # Bounds worst-case memory even with the streaming body-read cap in place
+    # (BODY_HARD_LIMIT in main.py) and stops a fork-bomb-style dependency bug
+    # from taking down the host (SPEC §2: not a DoS amplifier).
+    mem_limit: 512m
+    pids_limit: 128
+
+volumes:
+  caddy_data:
+  caddy_config:
+  caddy_logs:

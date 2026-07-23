@@ -1,0 +1,59 @@
+# Standalone Caddy for the http-bait honeypot. Same JA4/JA4H fingerprinting
+# wrapper as ../Caddyfile (caddy/ build), but its own container/config —
+# no shared network namespace or site block with any other service you run
+# / honeypot.example.com (SPEC §2 isolation requirement).
+{
+	servers {
+		listener_wrappers {
+			ja4
+			tls
+		}
+		# Bound slow-body ("slowloris"-style) connections at the edge — the
+		# app's own body-read cap (main.py's _read_capped_body) bounds bytes
+		# but not time, so a trickling upload could otherwise hold a
+		# connection (and, on this single-worker service, real capacity)
+		# open indefinitely. `timeouts` is a global-only option (spans all
+		# sites) — it cannot be set inside a site block.
+		timeouts {
+			read_body 15s
+			read_header 10s
+		}
+	}
+	order ja4 first
+	order ja4h_header after ja4
+}
+
+# Placeholder hostname — rewritten to the real registered domain by deploy.sh
+# at deploy time (same pattern as ../Caddyfile's honeypot.example.com).
+http-bait.example.com {
+	ja4 {
+		request_header X-JA4
+		var_name ja4
+	}
+	ja4h_header
+	encode gzip
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		# NOTE: deliberately NOT stripping Server/X-Powered-By here (unlike the
+		# other two Caddyfiles) — the app sets those headers on purpose to
+		# advertise a fake vulnerable version (SPEC §4.3); stripping them here
+		# would silently defeat that bait.
+	}
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50mb
+			roll_keep 10
+		}
+		format json
+	}
+	reverse_proxy app:8100 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-JA4 {http.vars.ja4}
+		header_up X-TLS-Version {http.request.tls.version}
+		header_up X-TLS-Cipher {http.request.tls.cipher_suite}
+		header_up X-TLS-SNI {http.request.tls.server_name}
+		header_up X-TLS-ALPN {http.request.tls.proto}
+		flush_interval -1
+	}
+}
