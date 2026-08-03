@@ -1,42 +1,63 @@
 # http-bait
 
-An HTTP honeypot that measures **exploitation**, not discovery.
+An HTTP honeypot built to measure **exploitation** rather than discovery.
+
+> **Research prototype.** This is an instrument for collecting and reasoning about
+> scanner behaviour, and it is not a production security control. It has run on one
+> host, for one window, under one operator. Read
+> [DATA-HANDLING.md](DATA-HANDLING.md) and [SPEC.md](SPEC.md) §2 before deploying it,
+> because running it makes you the custodian of a file of third-party network activity.
 
 Most honeypot writeups tell you who connected. This one is built to tell you who *used*
 what they found. It serves plausible leaked secrets (`.env`, `.git/config`,
 `.aws/credentials`, …), admin login panels, and fake vulnerable-version banners to the
-mass scanners that reach any new public IP within hours — and every "secret" it serves is
-a unique, attributable honeytoken. When one of those values comes back in a later request,
-that is proof a specific scrape led to a specific reuse, not an inference from timing.
+mass scanners that reach any new public IP within hours. Each synthetic secret carries a
+unique id, so when one comes back in a later request, a specific scrape is tied to a
+specific reuse by the value itself rather than by timing.
 
-## What it found
+The exception is the live AWS canary path, where one real key is shared across up to
+`HB_CANARYTOKENS_MAX_SERVINGS` visitors and is therefore attributable to a bounded set
+rather than to an individual. See [the canary section](#the-one-thing-that-isnt-fake).
 
-Numbers below cover a 12.66-day window (2026-07-10 to 2026-07-22): 3,820 requests from
-159 distinct IPs, 810 honeytokens issued.
+## What it measures
 
-- **Real exploitation, fast.** Genuine exploit attempts for Log4Shell (CVE-2021-44228,
-  a JNDI callback sprayed into headers), Spring4Shell (CVE-2022-22965, a POST trying to
-  plant a JSP webshell via `Runtime.exec()`), React2Shell (CVE-2025-55182), PHPUnit
-  (CVE-2017-9841), and WP-Automatic SQLi (CVE-2024-27956) — 41 hits across 5 CVEs by
-  retroactive scan, from 24 IPs.
-- **One confirmed honeytoken replay.** An IP scraped a fake GitHub PAT from
-  `/.git/config` and replayed it as a live `Authorization: Bearer` header against a batch
-  of API-secret probe paths roughly two minutes later.
-- **Nothing touched the credential-stuffing bait.** No `/admin/login` password spraying
-  in the whole window, despite the panel being served and indexed.
+Findings belong to a deployment, not to this repository, so none ship here.
+[FINDINGS.md](FINDINGS.md) is an empty template with the caveats you are expected to
+work through before quoting any number you produce; fill it in from your own logs.
 
-Detail, caveats, and the numbers you should *not* quote without reading the caveats are in
-[FINDINGS.md](FINDINGS.md). Two matter most: the live and retroactive CVE counts differ
-(17 vs 41) because two detector signatures shipped *after* the traffic they match arrived,
-and both are lower bounds because request bodies are capped.
+The reason those caveats are the longest section of the template is that the hardest
+problem with an instrument like this is not collecting data, it is knowing whether a
+quiet result means nothing happened or means the detector could never have fired. This
+codebase has produced both. A signature that shipped after the traffic it matches, and a
+reuse detector blind to ~14% of the bait it was watching, both looked exactly like
+absence of attack.
+
+You can watch that failure mode happen on synthetic data that ships with the repo:
+
+```bash
+python analyze.py fixtures/sample_events.jsonl --rescan
+```
+
+The live pass finds one CVE. Re-applying the current signature set to the same retained
+records finds five, including one whose signature postdates the traffic it matches by
+five days. Nothing about the traffic changed; only the detector did.
+
+[DETECTORS.md](DETECTORS.md) lists every signature and when it shipped, so you can tell
+which of your own counts could only have come from a rescan.
 
 ## Run it
 
+Locally, app only, bound to loopback:
+
 ```bash
-docker compose up -d --build
-curl -s http://localhost:8100/.env          # a lure, via the app directly
+docker compose -f docker-compose.local.yml up -d --build
+curl -s http://localhost:8100/.env
 python analyze.py data/logs/http_events.jsonl
 ```
+
+The main `docker-compose.yml` runs Caddy on 80/443 and requests a certificate for the
+hostname in `Caddyfile`, so it is for a real deployment rather than a laptop. It also
+does not publish the app's port, which is why the local file above exists.
 
 Tests:
 
@@ -60,21 +81,53 @@ costs unless you opt into live canary tokens (below).
 | `HB_HEALTH_MIN_FREE_BYTES` | `536870912` (512MB) | Below this free space, `/healthz` reports unhealthy. |
 | `HB_CANARYTOKENS_LIVE` | unset (off) | Opt in to minting **real** AWS canary keys via canarytokens.org. See below. |
 | `HB_CANARYTOKENS_REFRESH_SECS` | `86400` | Max age of a minted live key before re-minting. |
-| `HB_CANARYTOKENS_MAX_SERVINGS` | `30` | Max times one live key is served before re-minting. |
+| `HB_CANARYTOKENS_MAX_SERVINGS` | `30` | Max visitors served one live key before re-minting, and therefore the size of the set a real-world trigger narrows to. Clamped to 100. It interacts with the cooldown: `MAX_SERVINGS × 86400 / RETRY_COOLDOWN_SECS` is the ceiling on live servings per day (8,640 at the defaults), so a busier host needs headroom or visitors silently get synthetic keys. The effective values are logged at startup as `canary_config`. |
 | `HB_CANARYTOKENS_RETRY_COOLDOWN_SECS` | `300` | Floor between mint attempts against canarytokens.org. |
+| `HB_WINDOW_LABEL` | `unlabelled` | Tags every record with a collection window. Change it whenever the population changes, and **before publishing anything about a deployment**: readers arriving from a writeup are not organic scanner traffic, and mixing them invalidates every rate. `analyze.py --window <label>` then separates them. |
 
 ## The one thing that isn't fake
 
 Everything served is synthetic by default. With `HB_CANARYTOKENS_LIVE=1`, the AWS
 credential lure is backed by a **real, functioning** AWS canary key minted through
 canarytokens.org's public API, so a genuine third-party use fires their alerting as well
-as ours. The key grants no permissions — canarytokens.org's AWS canaries exist to trigger
-detection, not access.
+as ours. The key grants no permissions; canarytokens.org's AWS canaries exist to trigger
+detection rather than access.
+
+**This is the one lure that is not uniquely attributable**, and it is the exception to
+the uniqueness property described at the top of this file. One minted key is served to
+up to `HB_CANARYTOKENS_MAX_SERVINGS` visitors, so a later real-world trigger narrows to
+that set rather than to one visitor. Each serving is logged with a `serving_index` and a
+`mint_generation` so the set can be reconstructed exactly. Do not describe a live-canary
+trigger as proof that a particular visitor used the key.
 
 If you enable it, leave the three caps alone. `MAX_SERVINGS` is not a tuning knob: it
 bounds how many visitors could have been responsible for any single real-world trigger,
 which is what makes an alert attributable at all. `RETRY_COOLDOWN_SECS` bounds the request
 volume this can generate against canarytokens.org, a free service run by someone else.
+
+## The agent-bait surface
+
+Alongside the scanner lures, the service advertises a small machine-readable API and two
+operations, so a client that reads a schema and then calls what it advertises leaves
+much stronger evidence of automated tool use than a User-Agent or a request cadence
+would.
+
+| path | what it is |
+|---|---|
+| `/.well-known/ai-plugin.json` | Plugin manifest pointing at the OpenAPI document |
+| `/openapi.json`, `/swagger.json` | A deliberately synthetic schema, never FastAPI's real one |
+| `/api/v1/system/status` | `getSystemStatus`, logs `api_tool_call_attempt`, returns fake status |
+| `/api/v1/jobs/run` | `runMaintenanceJob`, logs the job name and argument keys, runs nothing and returns 503 |
+
+`analyze.py` reports discovery requests, operation calls, and the chains where the same
+client did both.
+
+This surface drew no traffic at all in the published window. That is a baseline rather
+than a result: it was undocumented until now, and one quiet window on one hostname is
+not evidence that agents do not do this.
+
+FastAPI's own generated schema is never exposed (`openapi_url=None`), because it would
+reveal the real route table and the trigger catcher.
 
 ## Ethics and scope
 
@@ -85,9 +138,13 @@ Read [SPEC.md §2](SPEC.md) before deploying. The short version, all of it load-
 - **Not a DoS amplifier.** Per-IP rate limiting, hard body caps, no reflection.
 - **Don't entrap.** It offers plausible exposed files and observes. It never solicits
   illegal action or walks a visitor toward one.
-- **Visitor credentials are never retained.** Anything submitted to a login lure is
-  recorded as presence and shape only — credentials sprayed at honeypots are frequently
-  real credentials stolen from someone else.
+- **Visitor credentials are not retained.** Anything submitted to any route is recorded
+  as presence and shape only, because credentials sprayed at honeypots are frequently
+  real credentials stolen from someone else. This is enforced in the middleware for
+  every request rather than per handler: an earlier version applied it only to the four
+  registered panel routes, so a POST to any other path was stored verbatim. Values of
+  credential-bearing headers are likewise reduced to a length and an ephemeral HMAC.
+  See [DATA-HANDLING.md](DATA-HANDLING.md).
 - **Coordinate disclosure.** If you catch a *named* vendor or tool doing something
   disclosure-worthy, tell them before you publish specifics.
 
@@ -97,17 +154,25 @@ Give it its own host and a hostname with no association to anything else you run
 ## Layout
 
 ```
-app/main.py            FastAPI honeypot: routes, telemetry middleware, honeytoken minting
-app/formatters.py      Per-kind fake-secret generators
-app/test_main.py       Behaviour tests (redaction, caps, non-retention)
+app/main.py             FastAPI honeypot: routes, telemetry middleware, honeytoken minting
+app/formatters.py       Per-kind fake-secret generators, and what length each one serves
+app/signatures.py       Detection tables, shared with analyze.py so the two cannot drift
+app/test_main.py        Behaviour tests (redaction, caps, non-retention)
 app/test_regressions.py Regression tests for previously-broken detectors
-analyze.py             Offline JSONL analyzer (stdlib only)
-Caddyfile              TLS reverse proxy with JA4/JA4H fingerprinting
-docker-compose.yml     caddy + app
-deploy.sh              Push to a host and bring the stack up
-pull-telemetry.sh      Fetch logs back for offline analysis
-SPEC.md                Design spec: what each piece is for, which constraints are load-bearing
-AGENTS.md              Machine-readable setup, commands, and hard constraints
+analyze.py              Offline JSONL analyzer (stdlib only)
+gen_detectors.py        Regenerates DETECTORS.md from the signature tables
+fixtures/               Synthetic log plus the exact report the analyzer prints for it
+Caddyfile               TLS reverse proxy with JA4/JA4H fingerprinting
+docker-compose.yml      caddy + app, for a real deployment
+docker-compose.local.yml App only, loopback, no TLS — for running it on your machine
+deploy.sh               Push to a host and bring the stack up
+pull-telemetry.sh       Fetch logs back for offline analysis
+SPEC.md                 Design spec: what each piece is for, which constraints are load-bearing
+FINDINGS.md             Empty template: fill in from your own deployment's logs
+DETECTORS.md            Generated signature timeline: what could have fired, and since when
+DATA-HANDLING.md        What is recorded, what is discarded, what you inherit as operator
+SECURITY.md             Reporting and data-removal contact
+AGENTS.md               Machine-readable setup, commands, and hard constraints
 ```
 
 ## License

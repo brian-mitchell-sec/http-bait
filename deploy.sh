@@ -25,7 +25,7 @@ echo ">> syncing repo to /opt/http-bait"
 rsync -az --delete -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new" \
   --exclude 'data/' --exclude '.git/' --exclude 'Caddyfile.deployed' --exclude 'docker-compose.deployed.yml' \
   --exclude '__pycache__/' \
-  --exclude 'FINDINGS.md' --exclude 'CONTENT_IDEAS.md' --exclude 'social/' \
+  --exclude 'FINDINGS.md' --exclude 'fixtures/' --exclude '.github/' \
   "$ROOT/" "root@$IP:/opt/http-bait/"
 scp -i "$KEY" "$ROOT/Caddyfile.deployed" "root@$IP:/opt/http-bait/Caddyfile"
 scp -i "$KEY" "$ROOT/docker-compose.deployed.yml" "root@$IP:/opt/http-bait/docker-compose.yml"

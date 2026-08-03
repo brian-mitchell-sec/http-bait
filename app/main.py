@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -22,17 +23,32 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote_plus
+from urllib.parse import parse_qs, unquote_plus
 
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
 from starlette.requests import ClientDisconnect
 
-from formatters import FORMATTERS, CATCHER_EMBEDDED
+from formatters import FORMATTERS, CATCHER_EMBEDDED, MIN_SERVED_TOKEN_LEN
+from signatures import (
+    CREDENTIAL_FIELD_NAMES,
+    CVE_SIGNATURES,
+    IDENTITY_FIELD_NAMES,
+    INDIRECT_COMMAND_RE,
+    ROOT_ROTATION_PERIOD_DAYS,
+    ROOT_VARIANT_CYCLE,
+    ROUTE_VARIANT,
+    SENSITIVE_HEADERS,
+    TOKEN_ID_LEN,
+    TOOL_INVOCATION_SIGNATURES,
+    VARIANTS,
+    root_variant_at,
+)
 
 LOG_DIR = Path(os.environ.get("HB_LOG_DIR", "/data/logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,6 +57,33 @@ CANARY_BASE = os.environ.get("HB_CANARY_BASE", "https://http-bait.example")
 
 BODY_CAP = 64_000          # hard cap on stored/read request body bytes (SPEC §2 non-goal: not a DoS amplifier)
 BODY_EXCERPT_CAP = 4_000   # logged excerpt cap (SPEC §6)
+
+# Per-field caps on attacker-controlled values that end up in a log record.
+# Header VALUES were capped already; these were not, so a request could still
+# write an unbounded User-Agent, path, or query into a JSONL line, and
+# header_order grew one entry per header sent. RECORD_MAX_BYTES is the backstop
+# on the assembled line for anything not individually bounded.
+UA_CAP = 1_000
+PATH_CAP = 2_000
+QUERY_CAP = 4_000
+XFF_CAP = 1_000
+FINGERPRINT_CAP = 256
+HEADER_ORDER_CAP = 100
+RECORD_MAX_BYTES = 128 * 1024
+
+# Labels every record with the collection window it belongs to. Publishing a
+# writeup changes who is looking: post-publication traffic is readers, security
+# tourists, and people testing the thing they just read about, and mixing it
+# into the organic scanner population silently contaminates every rate in
+# FINDINGS.md. Bump this before publishing so the two populations separate by
+# a field rather than by a timestamp guess.
+WINDOW_LABEL = os.environ.get("HB_WINDOW_LABEL", "unlabelled")
+
+
+def _cap(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}<truncated:len={len(value)}>"
 # Rotate http_events.jsonl once it crosses this size, keeping the newest
 # HB_LOG_KEEP_ROTATED rotated files and deleting older ones. Rotation alone
 # caps the LIVE file but not total disk: on a small droplet absorbing scanner
@@ -51,10 +94,30 @@ BODY_EXCERPT_CAP = 4_000   # logged excerpt cap (SPEC §6)
 LOG_MAX_BYTES = int(os.environ.get("HB_LOG_MAX_BYTES", 200 * 1024 * 1024))
 LOG_KEEP_ROTATED = int(os.environ.get("HB_LOG_KEEP_ROTATED", 10))
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    restored = rebuild_issued_token_index()
+    await alog({"event": "issued_token_index_rebuilt", "window": WINDOW_LABEL,
+                "records_replayed": restored, "index_size": len(_issued_token_ids),
+                "cap": ISSUED_TOKEN_MEMORY_CAP})
+    if CANARYTOKENS_LIVE:
+        # The attribution bound belongs in the data. A findings report should not
+        # be able to claim a live-canary trigger narrows to N visitors without
+        # the configured N and the servings ceiling being on the record.
+        await alog({"event": "canary_config", "window": WINDOW_LABEL,
+                    "max_servings": CANARYTOKENS_MAX_SERVINGS,
+                    "refresh_secs": CANARYTOKENS_REFRESH_SECS,
+                    "retry_cooldown_secs": CANARYTOKENS_RETRY_COOLDOWN_SECS,
+                    "max_live_servings_per_day": int(
+                        CANARYTOKENS_MAX_SERVINGS * 86400 / CANARYTOKENS_RETRY_COOLDOWN_SECS)})
+    yield
+
+
 # Never expose FastAPI's generated schema: it reveals the real route table,
 # Python-derived operation IDs, and the trigger catcher. A small deliberately
 # synthetic OpenAPI lure is served below instead.
-app = FastAPI(title="portal", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="portal", docs_url=None, redoc_url=None, openapi_url=None,
+              lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +167,19 @@ class JsonlWriter:
         try:
             record.setdefault("ts", datetime.now(timezone.utc).isoformat())
             line = json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+            if len(line) > RECORD_MAX_BYTES:
+                # Backstop for anything the per-field caps miss (a novel field,
+                # a pathological header set that fits every individual limit).
+                # Keep the fields an analyst needs to know the record existed
+                # and drop the rest, rather than writing an unbounded line or
+                # dropping the event entirely.
+                keep = {k: record.get(k) for k in
+                        ("ts", "event", "window", "ip", "method", "path",
+                         "status_served", "route_kind", "request_id")
+                        if record.get(k) is not None}
+                keep["oversize_record"] = True
+                keep["original_len"] = len(line)
+                line = json.dumps(keep, separators=(",", ":"), ensure_ascii=False)
             with self._lock:
                 self._rotate_if_needed()
                 with open(self.path, "a", encoding="utf-8") as f:
@@ -119,6 +195,10 @@ class JsonlWriter:
             print(f"http-bait: log write failed: {e}", file=sys.stderr)
 
     async def awrite(self, record: dict) -> None:
+        # Stamp here, not only in write(). This looks redundant with the same
+        # line below, but the write runs on a worker thread that may start much
+        # later under load: without this the timestamp records when the thread
+        # got around to it rather than when the event happened.
         record.setdefault("ts", datetime.now(timezone.utc).isoformat())
         try:
             await asyncio.to_thread(self.write, record)
@@ -131,10 +211,6 @@ class JsonlWriter:
 
 writer = JsonlWriter(EVENTS)
 _request_id_ctx: ContextVar[str] = ContextVar("http_bait_request_id", default="")
-
-
-def log(rec: dict) -> None:
-    writer.write(rec)
 
 
 async def alog(rec: dict) -> None:
@@ -154,19 +230,72 @@ _issued_token_prefixes: dict[str, str] = {}   # tok[:TOKEN_PREFIX_LEN] -> full i
 ISSUED_TOKEN_MEMORY_CAP = 50_000
 
 
-def _remember_issued_token(tok: str) -> None:
+_issued_token_evictions = 0
+
+
+def _remember_issued_token(tok: str) -> str | None:
+    """Add a token to the reuse index. Returns the evicted id, if any."""
+    global _issued_token_evictions
+    evicted = None
     if len(_issued_token_order) >= ISSUED_TOKEN_MEMORY_CAP:
         evicted = _issued_token_order.popleft()
         _issued_token_ids.discard(evicted)
         _issued_token_prefixes.pop(evicted[:TOKEN_PREFIX_LEN], None)
+        _issued_token_evictions += 1
     _issued_token_order.append(tok)
     _issued_token_prefixes[tok[:TOKEN_PREFIX_LEN]] = tok
     _issued_token_ids.add(tok)
+    return evicted
+
+
+def rebuild_issued_token_index() -> int:
+    """Repopulate the reuse index from the event log at startup.
+
+    The index was in-memory only, so every restart silently emptied it and
+    every token issued before the restart became unmatchable. A replay after a
+    deploy looked exactly like no replay, which is the same failure mode as the
+    prefix bug: a detector that cannot fire, reported as an attack that did not
+    happen.
+
+    Rebuilding from honeytoken_issued events costs one pass over the retained
+    log at boot and needs no new on-disk format. Rotated files are replayed
+    oldest-first so the newest ISSUED_TOKEN_MEMORY_CAP ids win.
+    """
+    rotated = sorted(LOG_DIR.glob(f"{EVENTS.stem}.*{EVENTS.suffix}"))
+    restored = 0
+    for path in [*rotated, EVENTS]:
+        if not path.exists():
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if '"honeytoken_issued"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue  # a torn final line is normal on a live file
+                    tok = rec.get("token")
+                    if isinstance(tok, str) and tok:
+                        _remember_issued_token(tok)
+                        restored += 1
+        except OSError as e:
+            print(f"http-bait: could not replay {path.name}: {e}", file=sys.stderr)
+    return restored
 
 
 async def honeytoken(kind: str, session: str, route: str) -> str | dict:
-    tok = uuid.uuid4().hex[:16]
-    _remember_issued_token(tok)
+    tok = uuid.uuid4().hex[:TOKEN_ID_LEN]
+    evicted = _remember_issued_token(tok)
+    if evicted is not None:
+        # An eviction means a previously-issued token can no longer be matched,
+        # so any later "no reuse observed" is bounded by this. Recording it
+        # keeps that bound in the data instead of in someone's memory: an
+        # attacker who scrapes, floods the index, then replays would otherwise
+        # produce a clean null.
+        await alog({"event": "issued_token_index_evicted", "token": evicted,
+                    "total_evictions": _issued_token_evictions,
+                    "cap": ISSUED_TOKEN_MEMORY_CAP})
     catcher_url = f"{CANARY_BASE}/x/{tok}" if kind in CATCHER_EMBEDDED else None
     await alog({"event": "honeytoken_issued", "kind": kind, "token": tok, "route": route, "session": session})
     return FORMATTERS[kind](tok, catcher_url)
@@ -207,8 +336,8 @@ CANARYTOKENS_MINT_TIMEOUT_SECS = 8.0
 # against canarytokens.org itself, found in ethics/safety review, that SPEC
 # §2's "not a DoS amplifier" guardrail didn't previously bound. Default
 # bounds worst-case real mint volume to ~12/hour regardless of attack
-# traffic; real observed load (FINDINGS.md) never comes close to needing a
-# remint this often, so legitimate use never notices the floor. Safe to gate
+# traffic, which is far above what serving ordinary scanner traffic needs, so
+# normal operation never notices the floor. Safe to gate
 # ROUTINE (non-failure) remints on this too, unlike an earlier version of
 # this check: once _live_aws_servings_exhausted(), the accessor below now
 # returns None (falls back to synthetic) rather than over-serving the real
@@ -223,7 +352,16 @@ CANARYTOKENS_RETRY_COOLDOWN_SECS = float(os.environ.get("HB_CANARYTOKENS_RETRY_C
 # capping by serving count too bounds that anonymity set directly, which is
 # the variable that actually determines how many suspects there are, rather
 # than relying solely on elapsed time.
-CANARYTOKENS_MAX_SERVINGS = int(os.environ.get("HB_CANARYTOKENS_MAX_SERVINGS", 30))
+# Traffic-dependent, so it stays configurable: MAX_SERVINGS x 86400/COOLDOWN is
+# the ceiling on live servings per day (8,640 at the defaults), and a busier host
+# starves live coverage without headroom. It is not a throughput knob, though.
+# Past ~100 a real-world trigger implicates enough visitors that the alert stops
+# identifying anyone, so the configured value is clamped and the effective
+# ceiling is logged at startup.
+CANARYTOKENS_MAX_SERVINGS_LIMIT = 100
+CANARYTOKENS_MAX_SERVINGS = min(
+    int(os.environ.get("HB_CANARYTOKENS_MAX_SERVINGS", 30)),
+    CANARYTOKENS_MAX_SERVINGS_LIMIT)
 
 _live_aws_lock = asyncio.Lock()
 _live_aws_cache: dict | None = None
@@ -243,7 +381,11 @@ async def _mint_live_aws_pair() -> dict | None:
     """One-shot mint call. Returns None on ANY failure (network, non-2xx,
     unexpected response shape) — this is best-effort, and must never raise
     into a request handler or block one waiting on a third party."""
-    tok = uuid.uuid4().hex[:16]
+    tok = uuid.uuid4().hex[:TOKEN_ID_LEN]
+    # Register the catcher token like any other issuance. Without this, a hit on
+    # this key's own webhook URL landed in /x/{token} as an id the service had
+    # never heard of, indistinguishable from a stranger probing catcher paths.
+    _remember_issued_token(tok)
     payload = {
         "token_type": "aws_keys",
         "memo": f"http-bait honeypot live AWS canary, issued {datetime.now(timezone.utc).isoformat()}",
@@ -413,40 +555,14 @@ def _rate_limited(ip: str) -> bool:
 # so different bait surfaces advertise different vulnerable stacks and draw
 # comparably-classified follow-up.
 # --------------------------------------------------------------------------- #
-VARIANTS = {
-    "wordpress": {"server": "Apache/2.4.29 (Ubuntu)", "x_powered_by": "PHP/7.2.24",
-                  "meta": '<meta name="generator" content="WordPress 5.7.2" />'},
-    "struts": {"server": "Apache-Coyote/1.1", "x_powered_by": None,
-               "meta": '<!-- Apache Struts 2.3.31 -->'},
-    "spring": {"server": None, "x_powered_by": None,
-               "meta": '<!-- Spring Boot 2.1.6.RELEASE -->'},
-}
-ROUTE_VARIANT = {
-    "/wp-config.php": "wordpress",
-    "/wp-login.php": "wordpress",
-    # phpMyAdmin is bundled on the same LAMP stack as the WordPress bait, so it
-    # shares that variant's Apache/PHP banner rather than getting its own.
-    "/phpmyadmin/": "wordpress", "/phpmyadmin/index.php": "wordpress",
-    "/admin": "struts", "/admin/login": "struts",
-    "/actuator/env": "spring", "/actuator/health": "spring",
-    # Permanently-pinned parallel variants (2026-07 addition) — see the
-    # "Landing page(s)" section below for why these run alongside "/"'s
-    # existing rotation instead of replacing it.
-    "/app": "wordpress", "/site": "struts", "/legacy": "spring",
-    # "/" rotates across all three below (SPEC §4.3 "rotate periodically").
-    # "/debug", "/debug/vars" carry NO banner on purpose — their body is
-    # Go-expvar-shaped (cmdline/memstats), and real Go net/http servers don't
-    # set a Server header by default, so silence here is itself consistent
-    # signal rather than a mismatch with a Spring/WordPress/Struts banner.
-}
-ROOT_VARIANT_CYCLE = ["wordpress", "struts", "spring"]
-ROOT_ROTATION_PERIOD_DAYS = 14
+# VARIANTS / ROUTE_VARIANT / ROOT_VARIANT_CYCLE / ROOT_ROTATION_PERIOD_DAYS all
+# live in signatures.py now, so analyze.py classifies traffic with the same
+# table the service served it under. They used to be copied into analyze.py by
+# hand, and the copy had already drifted.
 
 
 def _root_variant() -> str:
-    epoch_days = int(datetime.now(timezone.utc).timestamp() // 86400)
-    idx = (epoch_days // ROOT_ROTATION_PERIOD_DAYS) % len(ROOT_VARIANT_CYCLE)
-    return ROOT_VARIANT_CYCLE[idx]
+    return root_variant_at(datetime.now(timezone.utc))
 
 
 def current_variant_name(path: str) -> str | None:
@@ -455,10 +571,7 @@ def current_variant_name(path: str) -> str | None:
     return ROUTE_VARIANT.get(path)
 
 
-def apply_variant_headers(resp: Response, path: str) -> None:
-    name = current_variant_name(path)
-    if not name:
-        return
+def _apply_variant(resp: Response, name: str) -> None:
     v = VARIANTS[name]
     if v["server"]:
         resp.headers["Server"] = v["server"]
@@ -466,54 +579,14 @@ def apply_variant_headers(resp: Response, path: str) -> None:
         resp.headers["X-Powered-By"] = v["x_powered_by"]
 
 
-# Short static list of public path/param/header signatures for known exploits
-# against the ADVERTISED versions above (SPEC §4.3) — not a full CVE database,
-# just enough to flag targeted (non-generic) follow-up.
-CVE_SIGNATURES = [
-    # React Server Components unsafe deserialization ("React2Shell"). The
-    # exploit payloads observed here arrive as multipart Server Action POSTs
-    # with `Next-Action: x` and this promise/prototype chain in the body.
-    # React tracks the upstream flaw as CVE-2025-55182; affected frameworks
-    # such as Next.js received their own downstream advisories.
-    ("CVE-2025-55182", re.compile(r"\$1:__proto__:then", re.I), "body"),
-    # Spring4Shell / class-loader manipulation
-    ("CVE-2022-22965", re.compile(r"class\.module\.classLoader", re.I), "any"),
-    # Struts2 OGNL RCE via Content-Type (S2-045/S2-046 family)
-    ("CVE-2017-5638", re.compile(r"%\{.*(ognl|runtime|processbuilder)", re.I), "content-type"),
-    # S2-057 payloads put the action prefix BEFORE the OGNL expression
-    # (`redirect:${233*233}`, `redirectAction:${...}`), and the RCE variant
-    # spells it `ognl.OgnlContext` with a dot, not `ognl:`. The previous
-    # pattern required `${` first and a trailing colon, so it matched none of
-    # the shapes actually seen in the wild — a detector that could never fire.
-    ("CVE-2018-11776", re.compile(r"(redirect(action)?:|@?ognl[.:])", re.I), "path"),
-    # Spring Boot Actuator env-based RCE (pre-2.x actuator write-env chain)
-    ("CVE-2016-1000027", re.compile(r"org\.springframework\.remoting\.httpinvoker", re.I), "any"),
-    # WordPress xmlrpc.php pingback / multicall abuse (generic but version-gated by our banner)
-    ("CVE-2020-25213", re.compile(r"wp_ajax|multicall|pingback\.ping", re.I), "any"),
-    # Log4Shell: sprayed into ANY header (User-Agent, X-Api-Version, Referer, ...)
-    # by real-world scanners regardless of advertised stack — not gated to a
-    # variant banner the way the others are, since this one doesn't need one.
-    ("CVE-2021-44228", re.compile(r"\$\{jndi:", re.I), "headers"),
-    # PHPUnit eval-stdin.php RCE — path alone is the exploit; a generic,
-    # stack-agnostic probe like Log4Shell, seen for real on 2026-07-13 riding
-    # along in a round-robin scan burst that this list didn't catch at the time.
-    ("CVE-2017-9841", re.compile(r"phpunit.*eval-stdin\.php", re.I), "path"),
-]
+def apply_variant_headers(resp: Response, path: str) -> None:
+    name = current_variant_name(path)
+    if name:
+        _apply_variant(resp, name)
 
 
-# Log attempted command/tool invocations as their own derived signal. These
-# patterns only PARSE the already-bounded request body; they never evaluate,
-# import, shell out, fetch, or otherwise act on attacker input.
-TOOL_INVOCATION_SIGNATURES = [
-    ("node:child_process.execSync",
-     re.compile(r"execSync\(\s*(['\"])(?P<command>.{1,200}?)\1", re.I | re.S)),
-    ("node:child_process.exec",
-     re.compile(r"(?<!Sync)exec\(\s*(['\"])(?P<command>.{1,200}?)\1", re.I | re.S)),
-    ("java:Runtime.exec",
-     re.compile(r"Runtime\.getRuntime\(\)\.exec\(\s*(['\"])(?P<command>.{1,200}?)\1", re.I | re.S)),
-    ("java:ProcessBuilder",
-     re.compile(r"ProcessBuilder\(\s*(['\"])(?P<command>.{1,200}?)\1", re.I | re.S)),
-]
+# CVE_SIGNATURES and TOOL_INVOCATION_SIGNATURES now live in signatures.py,
+# shared with analyze.py. Each CVE entry is (id, pattern, scope, since).
 
 
 def _safe_command_summary(command: str) -> dict:
@@ -547,12 +620,16 @@ async def check_attack_patterns(path: str, query: str, body_text: str, headers: 
         "body": body_text + "\n" + decoded_body,
         "any": " ".join([path, query, body_text, decoded_body, content_type]),
     }
-    for cve_id, pattern, where in CVE_SIGNATURES:
+    for cve_id, pattern, where, since in CVE_SIGNATURES:
         # .get() rather than [] so a signature added with a typo'd scope is a
         # dead signature, not a KeyError on every single request.
         if pattern.search(haystacks.get(where, "")):
+            # signature_since goes in the record so a later reader can tell,
+            # from the log alone, whether a row could have been produced live
+            # or only by a rescan with a newer signature set.
             await alog({"event": "cve_pattern_match", "cve_id": cve_id,
-                        "path": path, "matched_in": where, "ip": ip, "ua": ua})
+                        "path": path, "matched_in": where, "ip": ip, "ua": ua,
+                        "signature_since": since})
 
     # A Next/React Server Action header on multipart input is useful even when
     # the rate limiter or body cap prevents us from retaining the payload. It
@@ -572,7 +649,7 @@ async def check_attack_patterns(path: str, query: str, body_text: str, headers: 
             summary = _safe_command_summary(match.group("command"))
             await alog({"event": "tool_invocation_attempt", "tool": tool,
                         **summary, "path": path, "ip": ip, "ua": ua})
-    if re.search(r"\b(?:cp|child_process)\.exec\(\s*cmd\b", tool_haystack, re.I):
+    if INDIRECT_COMMAND_RE.search(tool_haystack):
         await alog({"event": "tool_invocation_attempt",
                     "tool": "node:child_process.exec",
                     "command": "<indirect cmd variable>", "command_len": 0,
@@ -603,7 +680,6 @@ def _headers_haystack(hdrs_raw: list) -> str:
     return "\n".join(v for _, v in hdrs_raw)
 
 
-SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "cookie", "set-cookie"}
 # Bodies are capped (BODY_CAP/BODY_EXCERPT_CAP) but header values were not, so a
 # single request carrying a ~1MB header value (within Go/Caddy's default
 # MaxHeaderBytes) wrote ~1MB into one JSONL line. At the per-IP rate limit that
@@ -612,14 +688,41 @@ SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "cookie", "set-cook
 HEADER_VALUE_CAP = 4_000
 HEADERS_TOTAL_CAP = 32_000
 
+# Ephemeral, per-process, never written anywhere. Redacted secrets are recorded
+# as HMAC(_REDACTION_SALT, value) so "the same unknown credential appeared on
+# two requests" stays answerable while the value itself does not survive.
+#
+# A bare sha256 would not be good enough here. Half of what lands in these
+# headers is Basic auth (base64 of user:pass) and low-entropy API keys, and an
+# unsalted digest of those is recoverable by dictionary attack from the
+# published log format alone. Regenerating the salt each start deliberately
+# costs cross-restart correlation: the alternative is a stored key that turns
+# every historical log into an offline-crackable corpus the moment it leaks.
+_REDACTION_SALT = os.urandom(32)
+
+
+def _redaction_digest(value: str) -> str:
+    return hmac.new(_REDACTION_SALT, value.encode("utf-8", "replace"),
+                    hashlib.sha256).hexdigest()[:12]
+
+
+def _sensitive_label(name: str, value: str) -> str:
+    if name.endswith("authorization"):
+        # "Bearer", "Basic", … — the scheme is signal, the credential is not.
+        return value.split(" ", 1)[0][:32] or "unknown"
+    if "cookie" in name:
+        return "cookie"
+    return "key"
+
 
 def _headers_for_log(headers: dict) -> dict:
     out = dict(headers)
     for name in SENSITIVE_HEADERS:
         value = out.get(name)
         if value is not None:
-            scheme = value.split(" ", 1)[0] if name.endswith("authorization") else "cookie"
-            out[name] = f"<redacted:{scheme}:len={len(value)}>"
+            label = _sensitive_label(name, value)
+            out[name] = (f"<redacted:{label}:len={len(value)}"
+                         f":hmac={_redaction_digest(value)}>")
     budget = HEADERS_TOTAL_CAP
     capped = {}
     for name, value in out.items():
@@ -633,20 +736,25 @@ def _headers_for_log(headers: dict) -> dict:
     return capped
 
 
-TOKEN_ID_LEN = 16                       # honeytoken() mints uuid4().hex[:16]
 # Some formatters serve only a PREFIX of the id rather than the whole thing —
 # formatters.db_password is tok[:12], and db_connection_string embeds the same
 # 12-char slice. Matching on the full 16 could therefore never fire for those
 # kinds (~14% of everything issued), so a replayed database password looked
 # identical to no replay at all. Scan for the shortest served form and check
 # the longer one where the run allows it.
-TOKEN_PREFIX_LEN = 12
+#
+# The width is derived from formatters.SERVED_TOKEN_LEN rather than hardcoded,
+# so a new kind that serves a shorter run widens the scan automatically instead
+# of silently falling outside it. That is the bug class this whole comment
+# exists because of; a constant here would just wait to go stale again.
+TOKEN_PREFIX_LEN = MIN_SERVED_TOKEN_LEN
 _HEX_RUN_RE = re.compile(r"[0-9a-f]{%d,}" % TOKEN_PREFIX_LEN)
 MAX_TOKEN_CANDIDATES = 4_000            # backstop on pathological hex-dense input
 
 
 async def _check_honeytoken_reuse(path: str, query: str, body: bytes,
-                                  headers: dict) -> None:
+                                  headers: dict,
+                                  body_available: bool = True) -> None:
     # Inspect before general-log redaction, retain only the already-random
     # honeytoken id and source location, and discard unknown visitor secrets.
     #
@@ -686,6 +794,7 @@ async def _check_honeytoken_reuse(path: str, query: str, body: bytes,
     for tok, (where, form) in seen.items():
         await alog({"event": "honeytoken_reuse_observed", "token": tok,
                     "path": path, "seen_in": where, "matched": form,
+                    "body_available": body_available,
                     "ip": headers.get("x-forwarded-for", "").split(",")[0].strip()})
 
 
@@ -700,7 +809,15 @@ async def _read_capped_body(request: Request) -> tuple[bytes, bool]:
         async for chunk in request.stream():
             total += len(chunk)
             if total > BODY_CAP:
-                return b"".join(chunks), True
+                # Keep the leading BODY_CAP bytes rather than discarding the
+                # whole offending chunk. Caddy proxies with `flush_interval -1`,
+                # so bodies arrive in few large chunks: dropping the chunk that
+                # crossed the line meant a single 64,001-byte write retained
+                # nothing at all, and a payload "past the cap" was in practice a
+                # payload that erased everything before it too. Signatures now
+                # get the first 64KB in every case.
+                chunks.append(chunk)
+                return b"".join(chunks)[:BODY_CAP], True
             chunks.append(chunk)
     except ClientDisconnect:
         # A client that promises a Content-Length and then goes away mid-body is
@@ -724,8 +841,7 @@ async def _read_capped_body(request: Request) -> tuple[bytes, bool]:
 async def telemetry_mw(request: Request, call_next):
     _request_id_ctx.set(uuid.uuid4().hex)
     hdrs, hdrs_raw = _headers_first_wins(request)
-    ip = hdrs.get("x-forwarded-for", "").split(",")[0].strip() or (
-        request.client.host if request.client else "")
+    ip = client_ip(hdrs, request.client.host if request.client else "")
 
     # The container healthcheck polls /healthz from loopback every 60s — ~1,440
     # hits/day against a real-traffic baseline of a few hundred, which would
@@ -735,25 +851,49 @@ async def telemetry_mw(request: Request, call_next):
     if request.url.path == "/healthz" and not hdrs.get("x-forwarded-for"):
         return await call_next(request)
 
-    def base_rec(status: int, route_kind: str) -> dict:
-        return {
-            "event": "request", "ip": ip, "xff": hdrs.get("x-forwarded-for", ""),
-            "ua": hdrs.get("user-agent", ""), "ja4": hdrs.get("x-ja4", ""), "ja4h": hdrs.get("ja4h", ""),
-            "tls": {"version": hdrs.get("x-tls-version", ""), "cipher": hdrs.get("x-tls-cipher", ""),
-                    "sni": hdrs.get("x-tls-sni", ""), "alpn": hdrs.get("x-tls-alpn", "")},
-            "method": request.method, "path": request.url.path, "query": str(request.url.query),
-            "header_order": [h[0] for h in hdrs_raw], "headers": _headers_for_log(hdrs),
+    async def log_request(status: int, route_kind: str, **body_fields) -> None:
+        # Every field below is attacker-controlled. Each one is bounded here,
+        # and JsonlWriter bounds the assembled record again: an unbounded
+        # field is a way to fill the disk, and a full disk stops collection
+        # while the service goes on answering 200s.
+        await alog({
+            "event": "request", "window": WINDOW_LABEL, "ip": ip,
+            "xff": _cap(hdrs.get("x-forwarded-for", ""), XFF_CAP),
+            "ua": _cap(hdrs.get("user-agent", ""), UA_CAP),
+            "ja4": _cap(hdrs.get("x-ja4", ""), FINGERPRINT_CAP),
+            "ja4h": _cap(hdrs.get("ja4h", ""), FINGERPRINT_CAP),
+            "tls": {"version": _cap(hdrs.get("x-tls-version", ""), FINGERPRINT_CAP),
+                    "cipher": _cap(hdrs.get("x-tls-cipher", ""), FINGERPRINT_CAP),
+                    "sni": _cap(hdrs.get("x-tls-sni", ""), FINGERPRINT_CAP),
+                    "alpn": _cap(hdrs.get("x-tls-alpn", ""), FINGERPRINT_CAP)},
+            "method": request.method[:16],
+            "path": _cap(request.url.path, PATH_CAP),
+            "query": _cap(str(request.url.query), QUERY_CAP),
+            "header_order": [h[0][:64] for h in hdrs_raw[:HEADER_ORDER_CAP]],
+            "header_count": len(hdrs_raw),
+            "headers": _headers_for_log(hdrs),
             "status_served": status, "route_kind": route_kind,
-        }
+            # Body fields land last so JSON key order stays stable: these lines
+            # are the published data format.
+            **body_fields,
+        })
 
     if _rate_limited(ip):
         # Skip the (relatively costly) body read on a flood, but still log
         # the hit — a silent gap here would be exactly the burst traffic
         # SPEC §8's cadence analysis most needs to see.
-        rec = base_rec(429, "rate-limited")
-        rec["body_len"] = 0
-        rec["body_excerpt"] = ""
-        await alog(rec)
+        await log_request(429, "rate-limited", body_len=0, body_excerpt="")
+        # Reuse detection used to sit below this early return, so a replayed
+        # honeytoken was invisible for the entire duration of a burst. That is
+        # backwards: a credential replay characteristically arrives as a
+        # rapid spray of Authorization headers across many probe paths, which
+        # is precisely the shape that trips the limiter, so the detector was
+        # blind to exactly the traffic it exists to catch. Scanning path, query
+        # and headers costs nothing extra because they are already parsed;
+        # only the body is unavailable, and that gap is now recorded rather
+        # than assumed.
+        await _check_honeytoken_reuse(request.url.path, str(request.url.query),
+                                      b"", hdrs, body_available=False)
         await check_attack_patterns(request.url.path, str(request.url.query), "",
                                     hdrs, body_available=False, headers_raw=hdrs_raw)
         return PlainTextResponse("rate limited", status_code=429)
@@ -761,10 +901,10 @@ async def telemetry_mw(request: Request, call_next):
     raw, exceeded = await _read_capped_body(request)
     await _check_honeytoken_reuse(request.url.path, str(request.url.query), raw, hdrs)
     if exceeded:
-        rec = base_rec(413, "catch-all")
-        rec["body_len"] = BODY_CAP + 1  # exact size unknown/irrelevant past the abort point
-        rec["body_excerpt"] = ""
-        await alog(rec)
+        # The true size is unknown past the abort point, so the field is named
+        # for what was actually measured.
+        await log_request(413, "catch-all", body_len_at_least=len(raw),
+                          body_truncated=True, body_excerpt="")
         await check_attack_patterns(request.url.path, str(request.url.query),
                                     raw.decode("utf-8", "replace"), hdrs,
                                     body_available=False, headers_raw=hdrs_raw)
@@ -779,16 +919,18 @@ async def telemetry_mw(request: Request, call_next):
 
     resp = await call_next(request)
 
+    # Any route that did not mark a credential submission itself gets the
+    # generic shape check, so redaction no longer depends on each handler
+    # remembering to opt in. This is what closes the catch-all POST hole.
+    infer_credential_submission(request, body)
+
     body_excerpt = body[:BODY_EXCERPT_CAP].decode("utf-8", "replace")
     if getattr(request.state, "sensitive_body", False):
         body_excerpt = f"<redacted:credential-submission:len={len(body)}>"
-    rec = base_rec(resp.status_code, getattr(request.state, "route_kind", "catch-all"))
-    rec["body_len"] = len(raw)
-    rec["body_excerpt"] = body_excerpt
     creds = getattr(request.state, "creds_submitted", None)
-    if creds is not None:
-        rec["creds_submitted"] = creds
-    await alog(rec)
+    await log_request(resp.status_code, getattr(request.state, "route_kind", "catch-all"),
+                      body_len=len(raw), body_excerpt=body_excerpt,
+                      **({"creds_submitted": creds} if creds is not None else {}))
 
     # Detection scans the complete bounded body (<=64KB), while the general
     # request record retains only its 4KB excerpt. This closes the easy evasion
@@ -799,13 +941,21 @@ async def telemetry_mw(request: Request, call_next):
     return resp
 
 
+def client_ip(headers, fallback: str = "") -> str:
+    """The reported client address: first X-Forwarded-For hop, else `fallback`.
+
+    One definition, because rec["ip"] and every derived event have to agree.
+    """
+    return headers.get("x-forwarded-for", "").split(",")[0].strip() or fallback
+
+
 def sess_of(request: Request) -> str:
     # No cookie-based session tracking: scanners essentially never retain
     # cookies, and a fresh honeytoken per hit is *more* attributable, not
     # less (SPEC §5's "unique per route/session" is satisfied trivially when
     # every hit is its own session). Use ip+ua as the grouping key for the
     # log/analysis layer instead of minting server-side session state.
-    return f"{request.headers.get('x-forwarded-for','').split(',')[0].strip()}|{request.headers.get('user-agent','')}"
+    return f"{client_ip(request.headers)}|{request.headers.get('user-agent', '')}"
 
 
 def mark(request: Request, kind: str) -> None:
@@ -815,8 +965,10 @@ def mark(request: Request, kind: str) -> None:
 def mark_credential_submission(request: Request, user: str, password: str,
                                source: str = "body") -> None:
     # Unknown visitor credentials may be stolen/reused material. Preserve the
-    # stuffing signal without retaining the values themselves.
-    request.state.sensitive_body = source == "body"
+    # stuffing signal without retaining the values themselves. Any body-derived
+    # source redacts the excerpt; "basic-auth" does not, because the credential
+    # was in a header that _headers_for_log already redacts.
+    request.state.sensitive_body = source.startswith("body")
     request.state.creds_submitted = {
         "user_present": bool(user),
         "user_len": len(user),
@@ -824,6 +976,90 @@ def mark_credential_submission(request: Request, user: str, password: str,
         "pass_len": len(password),
         "source": source,
     }
+
+
+_CREDENTIAL_LITERAL_RE = re.compile(
+    r"(?i)\b(" + "|".join(re.escape(n) for n in sorted(CREDENTIAL_FIELD_NAMES)) + r")"
+    r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|\S+)")
+
+
+def _redact_credential_literals(text: str) -> str:
+    """Strip credential values from free-form text that is logged verbatim.
+
+    Used for GraphQL query bodies, where a login mutation carries the password
+    inline as an argument rather than as a form field.
+    """
+    return _CREDENTIAL_LITERAL_RE.sub(r"\1\2<redacted>", text)
+
+
+def _decode_credential_fields(body: bytes, content_type: str) -> tuple[str, str] | None:
+    """Pull (identity, secret) out of a form-encoded or JSON body, or None.
+
+    Field names come from signatures.CREDENTIAL_FIELD_NAMES /
+    IDENTITY_FIELD_NAMES so the panel handlers and this generic path agree on
+    what counts as a credential.
+    """
+    if not body:
+        return None
+    text = body[:BODY_CAP].decode("utf-8", "replace")
+    fields: dict[str, str] = {}
+    if "application/json" in content_type:
+        try:
+            data = json.loads(text or "{}")
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        fields = {str(k).lower(): str(v) for k, v in data.items()
+                  if isinstance(v, (str, int, float))}
+    else:
+        # parse_qs on a body that is not actually form-encoded yields either
+        # nothing or one junk key, so this is safe to attempt unconditionally.
+        try:
+            fields = {k.lower(): (v[0] if v else "")
+                      for k, v in parse_qs(text, keep_blank_values=True).items()}
+        except Exception:
+            return None
+    secret = next((fields[k] for k in fields if k in CREDENTIAL_FIELD_NAMES), "")
+    identity = next((fields[k] for k in fields if k in IDENTITY_FIELD_NAMES), "")
+    return (identity, secret) if (identity or secret) else None
+
+
+def infer_credential_submission(request: Request, body: bytes) -> None:
+    """Redact credential-shaped bodies on routes with no dedicated handler.
+
+    Redaction used to depend entirely on a handler calling
+    mark_credential_submission(), and only four POST handlers did. Everything
+    else fell through to catch_all and the raw body was written to
+    body_excerpt verbatim. /admin is advertised in robots.txt and sitemap.xml
+    but only registers GET, so a stuffing tool that POSTed to the advertised
+    URL rather than the form's action had its credentials stored in full —
+    which is exactly the material the non-retention rule exists to not keep,
+    since credentials sprayed at a honeypot are usually stolen from a third
+    party who has nothing to do with any of this.
+
+    Called from the middleware for every request no handler already marked, so
+    a new lure cannot reintroduce the gap by forgetting to opt in.
+    """
+    if getattr(request.state, "creds_submitted", None) is not None:
+        return
+    found = _decode_credential_fields(body, request.headers.get("content-type", ""))
+    if not found or not found[1]:   # an identity with no secret is not a submission
+        return
+    mark_credential_submission(request, *found, source="body-inferred")
+
+
+def mark_panel_credentials(request: Request) -> None:
+    """Record a panel login POST's credential shape, without retaining values.
+
+    Field names come from signatures.CREDENTIAL_FIELD_NAMES/IDENTITY_FIELD_NAMES,
+    so a panel handler cannot recognise a field the generic inference path misses,
+    or vice versa. Each panel used to carry its own parser and its own idea of
+    which field names counted.
+    """
+    user, pw = _decode_credential_fields(
+        request.state.body, request.headers.get("content-type", "")) or ("", "")
+    mark_credential_submission(request, user, pw)
 
 
 HEALTH_MIN_FREE_BYTES = int(os.environ.get("HB_HEALTH_MIN_FREE_BYTES", 512 * 1024 * 1024))
@@ -1126,21 +1362,7 @@ async def admin_login_form(request: Request):
 @app.post("/admin/login")
 async def admin_login_submit(request: Request):
     mark(request, "admin")
-    body = request.state.body
-    ct = request.headers.get("content-type", "")
-    user = pw = ""
-    try:
-        if "application/json" in ct:
-            data = json.loads(body or b"{}")
-            user, pw = str(data.get("username", data.get("user", ""))), str(data.get("password", data.get("pass", "")))
-        else:
-            from urllib.parse import parse_qs
-            data = parse_qs(body.decode("utf-8", "replace"))
-            user = (data.get("username") or data.get("user") or [""])[0]
-            pw = (data.get("password") or data.get("pass") or [""])[0]
-    except Exception:
-        pass
-    mark_credential_submission(request, user, pw)
+    mark_panel_credentials(request)
     resp = HTMLResponse(_LOGIN_FORM.format(meta="<!-- invalid credentials -->"), status_code=401)
     apply_variant_headers(resp, "/admin")
     return resp
@@ -1181,15 +1403,7 @@ async def wp_login_form(request: Request):
 @app.post("/wp-login.php")
 async def wp_login_submit(request: Request):
     mark(request, "admin")
-    body = request.state.body
-    try:
-        from urllib.parse import parse_qs
-        data = parse_qs(body.decode("utf-8", "replace"))
-        user = (data.get("log") or [""])[0]
-        pw = (data.get("pwd") or [""])[0]
-    except Exception:
-        user = pw = ""
-    mark_credential_submission(request, user, pw)
+    mark_panel_credentials(request)
     # Real WordPress renders the error INLINE at 200, not a 401/403 — matching
     # that is part of the fingerprint; a stuffing tool checking status code
     # alone would otherwise learn nothing from a non-200 response here.
@@ -1249,15 +1463,7 @@ async def phpmyadmin_form(request: Request):
 @app.post("/phpmyadmin/index.php")
 async def phpmyadmin_submit(request: Request):
     mark(request, "admin")
-    body = request.state.body
-    try:
-        from urllib.parse import parse_qs
-        data = parse_qs(body.decode("utf-8", "replace"))
-        user = (data.get("pma_username") or [""])[0]
-        pw = (data.get("pma_password") or [""])[0]
-    except Exception:
-        user = pw = ""
-    mark_credential_submission(request, user, pw)
+    mark_panel_credentials(request)
     error = '<div class="alert alert-danger" role="alert">#1045 Cannot log in to the MySQL server</div>'
     resp = HTMLResponse(_PHPMYADMIN_FORM.format(
         meta=VARIANTS["wordpress"]["meta"], error=error, token=_pma_token()))
@@ -1314,18 +1520,13 @@ async def adminer(request: Request):
     mark(request, "admin")
     error = ""
     if request.method == "POST":
-        try:
-            from urllib.parse import parse_qs
-            data = parse_qs(request.state.body.decode("utf-8", "replace"))
-            user = (data.get("auth[username]") or data.get("username") or [""])[0]
-            pw = (data.get("auth[password]") or data.get("password") or [""])[0]
-        except Exception:
-            user = pw = ""
-        mark_credential_submission(request, user, pw)
+        mark_panel_credentials(request)
         error = '<p class="error">Access denied for user</p>'
     resp = HTMLResponse(_ADMINER_FORM.format(error=error))
-    resp.headers["Server"] = "Apache/2.4.29 (Ubuntu)"
-    resp.headers["X-Powered-By"] = "PHP/7.2.24"
+    # Same LAMP stack as the WordPress bait; read the banner rather than
+    # restating it, so changing the variant cannot leave these routes
+    # advertising a version nothing else serves.
+    _apply_variant(resp, "wordpress")
     return resp
 
 
@@ -1400,8 +1601,7 @@ async def phpinfo(request: Request):
 <tr><td>DATABASE_URL</td><td>{html.escape(db_url)}</td></tr>
 </table></body></html>"""
     resp = HTMLResponse(body)
-    resp.headers["Server"] = "Apache/2.4.29 (Ubuntu)"
-    resp.headers["X-Powered-By"] = "PHP/7.2.24"
+    _apply_variant(resp, "wordpress")
     return resp
 
 
@@ -1428,11 +1628,21 @@ async def security_txt(request: Request):
 async def graphql(request: Request):
     mark(request, "graphql")
     body = request.state.body
+    parsed = True
     try:
         query = json.loads(body or b"{}").get("query", "")
+        if not isinstance(query, str):
+            query = ""
     except Exception:
-        query = body[:2000].decode("utf-8", "replace")
-    await alog({"event": "graphql_query", "query": query[:4000], "ip": request.headers.get("x-forwarded-for", "")})
+        # A body that isn't JSON was previously logged raw, which made this the
+        # one route that retained arbitrary POST content verbatim regardless of
+        # what was in it. Record its shape and let the middleware's own excerpt
+        # (already credential-redacted) be the only copy.
+        query = ""
+        parsed = False
+    await alog({"event": "graphql_query", "query": _redact_credential_literals(query)[:4000],
+                "parsed": parsed, "body_len": len(body),
+                "ip": request.headers.get("x-forwarded-for", "").split(",")[0].strip()})
     return JSONResponse({"errors": [{"message": "introspection is disabled in this environment"}]}, status_code=400)
 
 
@@ -1448,53 +1658,33 @@ async def graphql(request: Request):
 # comparable in the same window; "/" is left rotating, unchanged, so its
 # existing multi-week timeline isn't disrupted.
 # --------------------------------------------------------------------------- #
-def _render_landing_html(variant: str, api_key: str) -> str:
-    return f"""<!doctype html><html><head><title>Portal</title>
-{VARIANTS[variant]['meta']}
+@app.get("/", response_class=HTMLResponse)
+@app.get("/app", response_class=HTMLResponse)
+@app.get("/site", response_class=HTMLResponse)
+@app.get("/legacy", response_class=HTMLResponse)
+async def landing(request: Request):
+    # cve-signal, not catch-all: this page's job is the fake-version banner
+    # (SPEC §4.3) as much as the leaked-key lure below.
+    #
+    # Known limitation (SPEC §5): a Maps key's "use" is a call to Google's own
+    # API, which we cannot intercept — same bare-key limitation as the AWS/
+    # GitHub/Stripe/OpenAI kinds. Reuse detection for this one relies solely
+    # on the value reappearing elsewhere (analyze.py's circumstantial-reuse
+    # scan), same as any other non-catcher-embedded kind.
+    mark(request, "cve-signal")
+    path = request.url.path
+    api_key = await honeytoken("google_api_key", sess_of(request), path)
+    resp = HTMLResponse(f"""<!doctype html><html><head><title>Portal</title>
+{VARIANTS[current_variant_name(path)]['meta']}
 </head><body>
 <h1>Welcome</h1>
 <p>Sign in to access your dashboard.</p>
 <script>
   window.__CONFIG__ = {{ mapsApiKey: "{api_key}", env: "production" }};
 </script>
-</body></html>"""
-
-
-async def _landing_page(request: Request, path: str) -> HTMLResponse:
-    # cve-signal, not catch-all: this page's job is the fake-version banner
-    # (SPEC §4.3) as much as the leaked-key lure below.
-    mark(request, "cve-signal")
-    s = sess_of(request)
-    # Known limitation (SPEC §5): a Maps key's "use" is a call to Google's own
-    # API, which we cannot intercept — same bare-key limitation as the AWS/
-    # GitHub/Stripe/OpenAI kinds. Reuse detection for this one relies solely
-    # on the value reappearing elsewhere (analyze.py's circumstantial-reuse
-    # scan), same as any other non-catcher-embedded kind.
-    api_key = await honeytoken("google_api_key", s, path)
-    variant = current_variant_name(path)
-    resp = HTMLResponse(_render_landing_html(variant, api_key))
+</body></html>""")
     apply_variant_headers(resp, path)
     return resp
-
-
-@app.get("/", response_class=HTMLResponse)
-async def landing(request: Request):
-    return await _landing_page(request, "/")
-
-
-@app.get("/app", response_class=HTMLResponse)
-async def landing_app(request: Request):
-    return await _landing_page(request, "/app")
-
-
-@app.get("/site", response_class=HTMLResponse)
-async def landing_site(request: Request):
-    return await _landing_page(request, "/site")
-
-
-@app.get("/legacy", response_class=HTMLResponse)
-async def landing_legacy(request: Request):
-    return await _landing_page(request, "/legacy")
 
 
 # --------------------------------------------------------------------------- #
@@ -1533,10 +1723,26 @@ async def sitemap_xml(request: Request):
 # --------------------------------------------------------------------------- #
 @app.api_route("/x/{token}", methods=["GET", "POST"])
 async def trigger_catcher(request: Request, token: str):
+    """A hit here proves "use" only if the token was one we issued.
+
+    /x/ is a public path like any other, so scanners walk it with ids that were
+    never minted. Those used to be logged as honeytoken_triggered exactly like
+    a genuine callback, which inflates the one metric that is supposed to be
+    unambiguous. Confirmed triggers and unissued probes are now separate
+    events; analyze.py counts only the former as use.
+    """
     mark(request, "catch-all")
-    await alog({"event": "honeytoken_triggered", "token": token,
-                "ip": request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else ""),
-                "ua": request.headers.get("user-agent", "")})
+    ident = token.lower()
+    issued = (ident in _issued_token_ids
+              or _issued_token_prefixes.get(ident[:TOKEN_PREFIX_LEN]) is not None)
+    await alog({
+        "event": "honeytoken_triggered" if issued else "catcher_probe_unissued",
+        "token": token[:64],
+        "index_size": len(_issued_token_ids),
+        "index_evictions": _issued_token_evictions,
+        "ip": client_ip(request.headers, request.client.host if request.client else ""),
+        "ua": _cap(request.headers.get("user-agent", ""), UA_CAP),
+    })
     return PlainTextResponse("ok")
 
 
