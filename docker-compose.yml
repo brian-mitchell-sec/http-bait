@@ -31,6 +31,12 @@ services:
     environment:
       - HB_LOG_DIR=/data/logs
       - HB_CANARY_BASE=https://http-bait.example.com
+      # Tags every record with the collection window it belongs to. Change this
+      # whenever the population you are collecting from changes — most
+      # importantly before publishing anything about this deployment, since
+      # readers arriving from a writeup are not the organic scanner traffic the
+      # earlier records sampled, and mixing the two silently invalidates rates.
+      - HB_WINDOW_LABEL=w1
       # Opt-in: mints a REAL, functioning AWS canary key via canarytokens.org
       # (see main.py's "Live canarytokens.org integration" section) instead of
       # a purely synthetic aws_pair. Off by default — uncomment to enable; this
@@ -61,7 +67,7 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
     # Bounds worst-case memory even with the streaming body-read cap in place
-    # (BODY_HARD_LIMIT in main.py) and stops a fork-bomb-style dependency bug
+    # (BODY_CAP in main.py) and stops a fork-bomb-style dependency bug
     # from taking down the host (SPEC §2: not a DoS amplifier).
     mem_limit: 512m
     pids_limit: 128

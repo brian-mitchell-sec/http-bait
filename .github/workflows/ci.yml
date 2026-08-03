@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the Dockerfile pins and what the published numbers were
+        # produced on. 3.14 is here so the suite does not quietly rot against a
+        # newer runtime the way the asyncio.get_event_loop() call in
+        # test_regressions.py did.
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt pytest
+
+      - name: Tests
+        env:
+          HB_LOG_DIR: ${{ runner.temp }}/hb-logs
+        run: cd app && python -m pytest -q
+
+      - name: Analyzer reproduces the published fixture
+        # The report in fixtures/expected_analysis.txt is what FINDINGS.md's
+        # methodology claims are checked against. If this step fails, either the
+        # analyzer changed behaviour or the fixture is stale; both need a human.
+        run: |
+          python analyze.py fixtures/sample_events.jsonl --rescan > /tmp/got.txt
+          diff -u fixtures/expected_analysis.txt /tmp/got.txt
+
+      - name: DETECTORS.md is current
+        run: |
+          python gen_detectors.py > /tmp/detectors.md
+          diff -u DETECTORS.md /tmp/detectors.md
+
+      - name: Analyzer runs with no app/ dependencies installed
+        # analyze.py is documented as stdlib-only so it can run against a log on
+        # a machine with no virtualenv. Prove it rather than assert it.
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/python analyze.py fixtures/sample_events.jsonl > /dev/null
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t http-bait:ci .
+      - name: Container starts and reports healthy
+        run: |
+          docker run -d --name hb -e HB_LOG_DIR=/tmp/logs -p 127.0.0.1:8100:8100 http-bait:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8100/healthz > /dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          test "${ok:-0}" = "1" || { docker logs hb; exit 1; }
+          curl -fsS http://127.0.0.1:8100/.env | grep -q DB_PASSWORD
+          docker rm -f hb

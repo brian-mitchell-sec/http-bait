@@ -23,14 +23,6 @@ def _b64_pad(tok: str, n: int) -> str:
     return base64.b64encode(raw).decode().rstrip("=")[:n]
 
 
-def aws(tok: str, catcher_url: str | None) -> str:
-    # AKIA + 16 uppercase alnum, paired with a 40-char secret. Public honeytoken
-    # convention (canarytokens.org AWS keys use the same AKIA-prefixed shape).
-    access_key = "AKIA" + _hex_pad(tok, 16, upper=True)
-    secret = _b64_pad(tok, 40)
-    return f"{access_key}:{secret}"
-
-
 def aws_pair(tok: str, catcher_url: str | None = None) -> dict:
     access_key = "AKIA" + _hex_pad(tok, 16, upper=True)
     secret = _b64_pad(tok, 40)
@@ -113,7 +105,6 @@ def ssh_private_key(tok: str, catcher_url: str | None) -> str:
 
 
 FORMATTERS = {
-    "aws": aws,
     "aws_pair": aws_pair,
     "db_password": db_password,
     "gcp": gcp,
@@ -132,3 +123,52 @@ FORMATTERS = {
 # to that URL, directly observable). Everything else can only be detected via
 # reappearance elsewhere (Authorization headers on other routes) — see SPEC §5.
 CATCHER_EMBEDDED = {"slack_webhook"}
+
+# How many leading characters of the token id each kind actually serves as one
+# contiguous run, lowercased.
+#
+# This exists because the reuse detector used to assume every kind served the
+# full 16-character id. Two kinds serve 12. A replayed database password
+# therefore could not fire the detector at all, across ~14% of everything ever
+# issued, and a quiet reuse result then reads as a finding rather than as a
+# blind spot. Nothing in the code enforced the assumption, so nothing caught it;
+# AGENTS.md had to warn about the trap in prose.
+#
+# The detector now scans for min(SERVED_TOKEN_LEN.values()) instead of a
+# hardcoded constant, and test_regressions.py asserts every number below against
+# what the formatter really emits. Adding a kind that serves a shorter run
+# lowers the scan width automatically; declaring the wrong number fails a test.
+SERVED_TOKEN_LEN = {
+    "aws_pair": 16,
+    "db_password": 12,
+    "gcp": 16,
+    "github_pat": 16,
+    "slack_bot_token": 16,
+    "slack_webhook": 16,
+    "stripe_secret": 16,
+    "db_connection_string": 12,
+    "jwt": 16,
+    "openai_key": 16,
+    "google_api_key": 16,
+    "ssh_private_key": 16,
+}
+
+MIN_SERVED_TOKEN_LEN = min(SERVED_TOKEN_LEN.values())
+
+
+def served_run_len(kind: str, tok: str, catcher_url: str | None = None) -> int:
+    """Longest leading slice of `tok` that appears verbatim in this kind's
+    output, lowercased. The ground truth SERVED_TOKEN_LEN is checked against."""
+    value = FORMATTERS[kind](tok, catcher_url)
+    if isinstance(value, dict):
+        text = json.dumps(value)
+    else:
+        text = str(value)
+    text = text.lower()
+    best = 0
+    for n in range(1, len(tok) + 1):
+        if tok[:n].lower() in text:
+            best = n
+        else:
+            break
+    return best
