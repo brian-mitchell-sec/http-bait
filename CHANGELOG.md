@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0 (unreleased)
+## v0.1.0 — 2026-08-03
 
 First tagged release. Everything below landed in one pass after a review of the initial
 public drop. Several items change what the tooling reports, so any figure produced by an

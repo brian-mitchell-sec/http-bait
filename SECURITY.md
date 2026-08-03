@@ -2,21 +2,16 @@
 
 ## Reporting a vulnerability in this code
 
-Use GitHub's private advisory flow:
+Preferred: GitHub's private advisory flow,
 **Security → Report a vulnerability** on
 <https://github.com/brian-mitchell-sec/http-bait/security/advisories/new>.
+That keeps the report private until there is a fix.
 
-That keeps the report private until there is a fix, and does not require either
-of us to publish an email address.
+By email: **security@brianmitchell.ai**.
 
 Please include the commit or tag you tested, how to reproduce, and what you
 think the impact is. There is no bounty here; this is a personal research
 project.
-
-<!-- TODO before publishing: replace with a real monitored address, or delete
-     this paragraph and rely on the advisory flow alone. Do not ship a
-     placeholder address in a document whose entire purpose is being
-     reachable. -->
 
 ## What is in scope
 
@@ -46,8 +41,9 @@ Not in scope:
 ## Data removal
 
 If you scanned a host running this and want records associated with your address
-removed, open a private advisory as above with the address and an approximate
-time range.
+removed, email **security@brianmitchell.ai** or open a private advisory, with the
+address and an approximate time range. A removal request should not require a
+GitHub account.
 
 Published material truncates third-party addresses to /24, and raw logs are not
 published. See [DATA-HANDLING.md](DATA-HANDLING.md) for exactly what is recorded
