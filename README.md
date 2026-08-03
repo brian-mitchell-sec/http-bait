@@ -81,7 +81,7 @@ costs unless you opt into live canary tokens (below).
 | `HB_HEALTH_MIN_FREE_BYTES` | `536870912` (512MB) | Below this free space, `/healthz` reports unhealthy. |
 | `HB_CANARYTOKENS_LIVE` | unset (off) | Opt in to minting **real** AWS canary keys via canarytokens.org. See below. |
 | `HB_CANARYTOKENS_REFRESH_SECS` | `86400` | Max age of a minted live key before re-minting. |
-| `HB_CANARYTOKENS_MAX_SERVINGS` | `30` | Max times one live key is served before re-minting. |
+| `HB_CANARYTOKENS_MAX_SERVINGS` | `30` | Max visitors served one live key before re-minting, and therefore the size of the set a real-world trigger narrows to. Clamped to 100. It interacts with the cooldown: `MAX_SERVINGS × 86400 / RETRY_COOLDOWN_SECS` is the ceiling on live servings per day (8,640 at the defaults), so a busier host needs headroom or visitors silently get synthetic keys. The effective values are logged at startup as `canary_config`. |
 | `HB_CANARYTOKENS_RETRY_COOLDOWN_SECS` | `300` | Floor between mint attempts against canarytokens.org. |
 | `HB_WINDOW_LABEL` | `unlabelled` | Tags every record with a collection window. Change it whenever the population changes, and **before publishing anything about a deployment**: readers arriving from a writeup are not organic scanner traffic, and mixing them invalidates every rate. `analyze.py --window <label>` then separates them. |
 
