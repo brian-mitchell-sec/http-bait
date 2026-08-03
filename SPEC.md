@@ -208,8 +208,8 @@ New standalone directory (this one), independently deployable:
 http-bait/
   app/
     main.py            # FastAPI app: routes above, JsonlWriter, honeytoken minting
-    formatters.py       # per-kind fake-secret formatters
-    static/             # landing page HTML/JS with the leaked-key-in-page lure
+    formatters.py       # per-kind fake-secret formatters + served-length declarations
+    signatures.py       # detection tables, shared with analyze.py
   Dockerfile
   Caddyfile             # standalone site block for the new subdomain
   docker-compose.yml    # caddy + app
@@ -217,12 +217,11 @@ http-bait/
 ```
 - Keep the hardening flags (`read_only`, `tmpfs: ["/tmp"]`,
   `cap_drop: ["ALL"]`, `no-new-privileges`).
-- A hostname with no history — do not reuse an
-  existing domain from either prior study.
+- A hostname with no history. Do not reuse a domain that resolves to, or has
+  ever resolved to, anything else you operate.
 - Can run on the existing droplet as an additional isolated container/site-block, or on
   a fresh droplet — deployer's choice; nothing here assumes either.
-- Pull telemetry the same way as `(internal reference removed)` (adjust path to this
-  service's `data/logs/`).
+- `pull-telemetry.sh <host_ip>` copies `data/logs/` back for offline analysis.
 
 ## 8. Analysis
 

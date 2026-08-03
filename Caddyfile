@@ -1,7 +1,7 @@
-# Standalone Caddy for the http-bait honeypot. Same JA4/JA4H fingerprinting
-# wrapper as ../Caddyfile (caddy/ build), but its own container/config —
-# no shared network namespace or site block with any other service you run
-# / honeypot.example.com (SPEC §2 isolation requirement).
+# Standalone Caddy for the http-bait honeypot: JA4/JA4H fingerprinting (see
+# caddy/Dockerfile for the build) in its own container with its own config.
+# It must not share a network namespace or a site block with anything else you
+# run (SPEC §2 isolation requirement).
 {
 	servers {
 		listener_wrappers {
@@ -23,8 +23,10 @@
 	order ja4h_header after ja4
 }
 
-# Placeholder hostname — rewritten to the real registered domain by deploy.sh
-# at deploy time (same pattern as ../Caddyfile's honeypot.example.com).
+# Placeholder hostname, rewritten to the real registered domain by deploy.sh
+# at deploy time. Never commit the hostname you actually serve: publishing it
+# ties the bait surface to you, and SPEC §2 asks for a name with no association
+# to anything else you operate.
 http-bait.example.com {
 	ja4 {
 		request_header X-JA4
