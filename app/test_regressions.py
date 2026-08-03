@@ -1,9 +1,10 @@
 """Verification for the pre-release fixes. Run inside the app/ dir."""
-import json, os, time, pathlib
+import contextlib, json, os, subprocess, sys, time, pathlib
 import pytest
 from fastapi.testclient import TestClient
 
 LOGDIR = pathlib.Path(os.environ["HB_LOG_DIR"])
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -15,18 +16,37 @@ def _isolate():
     """
     import main
     main._rate_buckets.clear()
-    main._issued_token_ids.clear()
-    main._issued_token_order.clear()
-    main._issued_token_prefixes.clear()
+    clear_token_index(main)
     yield
     main._rate_buckets.clear()
 
 
-def events():
+def events(kind=None):
     p = LOGDIR / "http_events.jsonl"
     if not p.exists():
         return []
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return [r for r in rows if kind is None or r.get("event") == kind]
+
+
+@contextlib.contextmanager
+def reuse_events():
+    """Collect exactly the honeytoken_reuse_observed events a block produces."""
+    before = len(events("honeytoken_reuse_observed"))
+    added = []
+    yield added
+    added.extend(events("honeytoken_reuse_observed")[before:])
+
+
+def run_analyze(*args, check=True):
+    return subprocess.run([sys.executable, str(REPO_ROOT / "analyze.py"), *args],
+                          capture_output=True, text=True, check=check)
+
+
+def clear_token_index(main):
+    main._issued_token_ids.clear()
+    main._issued_token_order.clear()
+    main._issued_token_prefixes.clear()
 
 
 def test_honeytoken_reuse_still_detected():
@@ -34,7 +54,7 @@ def test_honeytoken_reuse_still_detected():
     import main
     c = TestClient(main.app)
     c.get("/.env")
-    issued = [e for e in events() if e.get("event") == "honeytoken_issued"]
+    issued = events("honeytoken_issued")
     assert issued, "no honeytokens were minted by GET /.env"
     tok = issued[0]["token"]
 
@@ -44,10 +64,9 @@ def test_honeytoken_reuse_still_detected():
         ("body", lambda: c.post("/api/run-job", content=f"payload={tok}")),
         ("headers", lambda: c.get("/anything", headers={"x-probe": tok})),
     ]:
-        before = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
-        call()
-        after = [e for e in events() if e.get("event") == "honeytoken_reuse_observed"]
-        assert len(after) > before, f"reuse NOT detected in {where}"
+        with reuse_events() as after:
+            call()
+        assert after, f"reuse NOT detected in {where}"
         assert after[-1]["token"] == tok
         print(f"  reuse detected in {where}: seen_in={after[-1]['seen_in']}")
 
@@ -57,21 +76,20 @@ def test_uppercase_and_padded_token_detected():
     import main
     c = TestClient(main.app)
     c.get("/.aws/credentials")
-    issued = [e for e in events() if e.get("event") == "honeytoken_issued"]
+    issued = events("honeytoken_issued")
     tok = issued[-1]["token"]
-    before = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
-    c.get("/x", headers={"authorization-probe": "AKIA" + (tok * 2).upper()})
-    after = [e for e in events() if e.get("event") == "honeytoken_reuse_observed"]
-    assert len(after) > before, "padded/uppercase form not detected"
+    with reuse_events() as after:
+        c.get("/x", headers={"authorization-probe": "AKIA" + (tok * 2).upper()})
+    assert after, "padded/uppercase form not detected"
     print(f"  padded+uppercase detected: {after[-1]['token'] == tok}")
 
 
 def test_unissued_token_not_flagged():
     import main
     c = TestClient(main.app)
-    before = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
+    before = len(events("honeytoken_reuse_observed"))
     c.get("/anything?k=deadbeefdeadbeef")  # 16 hex chars, never issued
-    after = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
+    after = len(events("honeytoken_reuse_observed"))
     assert after == before, "false positive on an unissued 16-hex string"
     print("  no false positive on unissued hex")
 
@@ -101,9 +119,7 @@ def test_scan_cost_is_independent_of_issued_count():
             best = min(best, time.perf_counter() - t0)
         return best
 
-    main._issued_token_ids.clear()
-    main._issued_token_order.clear()
-    main._issued_token_prefixes.clear()
+    clear_token_index(main)
     empty = best_scan_seconds()
 
     for i in range(50_000):
@@ -127,7 +143,7 @@ def test_requests_still_served_with_a_full_token_index():
     assert r.status_code in (200, 404, 503), r.status_code
 
     tok = f"{7:012x}beef"
-    before = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
+    before = len(events("honeytoken_reuse_observed"))
     c.get(f"/anything?k={tok}")
     new_events = [e for e in events()
                   if e.get("event") == "honeytoken_reuse_observed"][before:]
@@ -149,7 +165,7 @@ def test_header_value_is_capped_in_log():
     import main
     c = TestClient(main.app)
     c.get("/anything", headers={"x-big": "z" * 200_000})
-    rec = [e for e in events() if e.get("event") == "request"][-1]
+    rec = events("request")[-1]
     line = json.dumps(rec)
     assert len(line) < 60_000, f"one request wrote {len(line)} bytes to the log"
     assert "<truncated:len=200000>" in line
@@ -190,16 +206,15 @@ def test_db_password_reuse_now_detected():
     import main
     c = TestClient(main.app)
     c.get("/.env")
-    issued = [e for e in events() if e.get("event") == "honeytoken_issued"]
+    issued = events("honeytoken_issued")
     dbp = [e for e in issued if e.get("kind") == "db_password"]
     assert dbp, f"no db_password issued; kinds seen: {set(e.get('kind') for e in issued)}"
     tok = dbp[-1]["token"]
     served = tok[:12]
     assert len(served) == 12
-    before = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
-    c.get(f"/anything?db={served}")
-    after = [e for e in events() if e.get("event") == "honeytoken_reuse_observed"]
-    assert len(after) > before, "12-char db_password replay STILL not detected"
+    with reuse_events() as after:
+        c.get(f"/anything?db={served}")
+    assert after, "12-char db_password replay STILL not detected"
     assert after[-1]["token"] == tok and after[-1]["matched"] == "prefix"
     print(f"  db_password 12-char replay detected -> full id {tok}")
 
@@ -227,12 +242,12 @@ def test_duplicate_header_payload_is_scanned():
 def test_internal_healthcheck_not_logged():
     import main
     c = TestClient(main.app)
-    before = len([e for e in events() if e.get("event") == "request"])
+    before = len(events("request"))
     c.get("/healthz")                                        # loopback, no XFF
-    mid = len([e for e in events() if e.get("event") == "request"])
+    mid = len(events("request"))
     assert mid == before, "internal healthcheck polluted the dataset"
     c.get("/healthz", headers={"x-forwarded-for": "203.0.113.5"})   # via Caddy
-    after = len([e for e in events() if e.get("event") == "request"])
+    after = len(events("request"))
     assert after == mid + 1, "external /healthz probe was wrongly dropped"
     print("  internal healthcheck skipped, external probe still logged")
 
@@ -259,7 +274,7 @@ def test_catch_all_post_credentials_are_redacted():
          "application/json"),
     ]:
         c.post(path, content=body, headers={"content-type": ctype})
-        rec = [e for e in events() if e.get("event") == "request"][-1]
+        rec = events("request")[-1]
         assert secret not in json.dumps(rec), f"{path} retained the password"
         assert rec["body_excerpt"].startswith("<redacted:credential-submission"), \
             f"{path} body_excerpt not redacted: {rec['body_excerpt']!r}"
@@ -275,7 +290,7 @@ def test_sensitive_headers_are_redacted():
     secret = "sk_live_REALVICTIMKEY"
     for header in ("x-api-key", "x-auth-token", "api-key", "x-amz-security-token"):
         c.get("/anything", headers={header: secret})
-        rec = [e for e in events() if e.get("event") == "request"][-1]
+        rec = events("request")[-1]
         assert secret not in json.dumps(rec), f"{header} retained verbatim"
         assert rec["headers"][header].startswith("<redacted:key:"), rec["headers"][header]
     print("  api-key-family headers redacted with an hmac, not stored")
@@ -311,18 +326,17 @@ def test_reuse_detected_while_rate_limited():
     import main
     c = TestClient(main.app)
     c.get("/.git/config")
-    issued = [e for e in events() if e.get("event") == "honeytoken_issued"]
+    issued = events("honeytoken_issued")
     tok = issued[-1]["token"]
 
     for _ in range(main.RATE_MAX_REQ + 2):
         c.get("/filler")
     assert c.get("/filler").status_code == 429, "rate limiter did not engage"
 
-    before = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
-    r = c.get("/probe", headers={"authorization": f"Bearer ghp_{tok}"})
-    assert r.status_code == 429, "expected this request to be rate limited"
-    after = [e for e in events() if e.get("event") == "honeytoken_reuse_observed"]
-    assert len(after) > before, "replay during a burst was NOT detected"
+    with reuse_events() as after:
+        r = c.get("/probe", headers={"authorization": f"Bearer ghp_{tok}"})
+        assert r.status_code == 429, "expected this request to be rate limited"
+    assert after, "replay during a burst was NOT detected"
     assert after[-1]["token"] == tok and after[-1]["body_available"] is False
     print("  honeytoken replay detected even while rate limited")
 
@@ -348,16 +362,16 @@ def test_unissued_catcher_probe_is_separate_event():
     c.get("/x/ffffffffffffffff")
     # The middleware writes its `request` record after the handler runs, so
     # filter for the catcher event rather than taking the last line.
-    probes = [e for e in events() if e.get("event") == "catcher_probe_unissued"]
+    probes = events("catcher_probe_unissued")
     assert probes and probes[-1]["token"] == "ffffffffffffffff"
-    assert not [e for e in events() if e.get("event") == "honeytoken_triggered"]
+    assert not events("honeytoken_triggered")
 
     c.get("/.env")
-    tok = [e for e in events() if e.get("event") == "honeytoken_issued"][-1]["token"]
+    tok = events("honeytoken_issued")[-1]["token"]
     c.get(f"/x/{tok}")
-    trig = [e for e in events() if e.get("event") == "honeytoken_triggered"]
+    trig = events("honeytoken_triggered")
     assert trig and trig[-1]["token"] == tok
-    assert len([e for e in events() if e.get("event") == "catcher_probe_unissued"]) == len(probes)
+    assert len(events("catcher_probe_unissued")) == len(probes)
     print("  unissued catcher probes no longer count as confirmed triggers")
 
 
@@ -366,20 +380,17 @@ def test_issued_token_index_rebuilds_from_log():
     import main
     c = TestClient(main.app)
     c.get("/.env")
-    tok = [e for e in events() if e.get("event") == "honeytoken_issued"][-1]["token"]
+    tok = events("honeytoken_issued")[-1]["token"]
 
-    main._issued_token_ids.clear()
-    main._issued_token_order.clear()
-    main._issued_token_prefixes.clear()
+    clear_token_index(main)
     assert tok not in main._issued_token_ids
 
     restored = main.rebuild_issued_token_index()
     assert restored > 0 and tok in main._issued_token_ids
 
-    before = len([e for e in events() if e.get("event") == "honeytoken_reuse_observed"])
-    c.get(f"/anything?k={tok}")
-    after = [e for e in events() if e.get("event") == "honeytoken_reuse_observed"]
-    assert len(after) > before, "replay after a simulated restart was not detected"
+    with reuse_events() as after:
+        c.get(f"/anything?k={tok}")
+    assert after, "replay after a simulated restart was not detected"
     print(f"  index rebuilt from log ({restored} issuances), replay still detected")
 
 
@@ -390,13 +401,13 @@ def test_graphql_does_not_retain_raw_body():
     c.post("/graphql", content=json.dumps(
         {"query": f'mutation {{ login(user:"v", password:"{secret}") }}'}),
         headers={"content-type": "application/json"})
-    gql = [e for e in events() if e.get("event") == "graphql_query"][-1]
+    gql = events("graphql_query")[-1]
     assert secret not in json.dumps(gql), f"graphql retained the password: {gql}"
     assert "<redacted>" in gql["query"]
 
     c.post("/graphql", content=b"\x00not-json-" + secret.encode(),
            headers={"content-type": "application/json"})
-    gql = [e for e in events() if e.get("event") == "graphql_query"][-1]
+    gql = events("graphql_query")[-1]
     assert gql["parsed"] is False and gql["query"] == ""
     assert secret not in json.dumps(gql), "unparseable graphql body retained raw"
     print("  graphql retains neither inline credentials nor raw unparsed bodies")
@@ -413,9 +424,6 @@ def test_oversize_record_is_bounded_not_dropped():
     assert last["ip"] == "203.0.113.9" and "junk" not in last
     assert last["original_len"] > main.RECORD_MAX_BYTES
     print("  oversize record truncated to identifying fields, still written")
-
-
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _import_analyze():
@@ -445,12 +453,9 @@ def test_analyzer_output_matches_published_fixture():
     plus a frozen expected report makes that kind of sentence checkable by a
     reader instead of a claim they take on trust.
     """
-    import subprocess, sys
     fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
     expected = (REPO_ROOT / "fixtures" / "expected_analysis.txt").read_text()
-    got = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "analyze.py"), str(fixture), "--rescan"],
-        capture_output=True, text=True, check=True).stdout
+    got = run_analyze(str(fixture), "--rescan").stdout
     # The fixture path is echoed by basename, so the report is location-independent.
     assert got == expected, (
         "analyzer output drifted from fixtures/expected_analysis.txt.\n"
@@ -477,13 +482,12 @@ def test_fixture_demonstrates_retroactive_detection():
 
 def test_analyzer_survives_a_torn_final_line():
     """pull-telemetry.sh rsyncs a file being appended to; a torn tail is normal."""
-    import subprocess, sys, tempfile
+    import tempfile
     fixture = (REPO_ROOT / "fixtures" / "sample_events.jsonl").read_text()
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
         fh.write(fixture + '{"ts":"2026-07-22T21:00:00+00:00","event":"req')
         torn = fh.name
-    r = subprocess.run([sys.executable, str(REPO_ROOT / "analyze.py"), torn],
-                       capture_output=True, text=True)
+    r = run_analyze(torn, check=False)
     assert r.returncode == 0, f"analyzer aborted on a torn line:\n{r.stderr}"
     assert "malformed lines skipped: 1" in r.stdout
     print("  torn final line skipped and counted, report still produced")
@@ -491,24 +495,18 @@ def test_analyzer_survives_a_torn_final_line():
 
 def test_analyzer_truncates_third_party_ips_by_default():
     """Truncation was once claimed as a property of the data with nothing behind it."""
-    import subprocess, sys
     fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
-    out = subprocess.run([sys.executable, str(REPO_ROOT / "analyze.py"), str(fixture)],
-                         capture_output=True, text=True, check=True).stdout
+    out = run_analyze(str(fixture)).stdout
     assert "198.51.100.0/24" in out
     assert "198.51.100.10" not in out, "a full third-party address was printed"
-    full = subprocess.run([sys.executable, str(REPO_ROOT / "analyze.py"), str(fixture),
-                           "--full-ips"], capture_output=True, text=True, check=True).stdout
+    full = run_analyze(str(fixture), "--full-ips").stdout
     assert "198.51.100.10" in full, "--full-ips did not restore full addresses"
     print("  third-party IPs print as /24 unless --full-ips is passed")
 
 
 def test_analyzer_excludes_self_test_traffic():
-    import subprocess, sys
     fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
-    out = subprocess.run([sys.executable, str(REPO_ROOT / "analyze.py"), str(fixture),
-                          "--exclude-ip", "198.51.100.10"],
-                         capture_output=True, text=True, check=True).stdout
+    out = run_analyze(str(fixture), "--exclude-ip", "198.51.100.10").stdout
     # 3 request records plus the reuse event recorded for that IP.
     assert "excluded: 4 by --exclude-ip" in out, out[:400]
     print("  self-test exclusion is a documented flag, not a manual step")

@@ -100,6 +100,16 @@ async def lifespan(_app: FastAPI):
     await alog({"event": "issued_token_index_rebuilt", "window": WINDOW_LABEL,
                 "records_replayed": restored, "index_size": len(_issued_token_ids),
                 "cap": ISSUED_TOKEN_MEMORY_CAP})
+    if CANARYTOKENS_LIVE:
+        # The attribution bound belongs in the data. A findings report should not
+        # be able to claim a live-canary trigger narrows to N visitors without
+        # the configured N and the servings ceiling being on the record.
+        await alog({"event": "canary_config", "window": WINDOW_LABEL,
+                    "max_servings": CANARYTOKENS_MAX_SERVINGS,
+                    "refresh_secs": CANARYTOKENS_REFRESH_SECS,
+                    "retry_cooldown_secs": CANARYTOKENS_RETRY_COOLDOWN_SECS,
+                    "max_live_servings_per_day": int(
+                        CANARYTOKENS_MAX_SERVINGS * 86400 / CANARYTOKENS_RETRY_COOLDOWN_SECS)})
     yield
 
 
@@ -185,6 +195,10 @@ class JsonlWriter:
             print(f"http-bait: log write failed: {e}", file=sys.stderr)
 
     async def awrite(self, record: dict) -> None:
+        # Stamp here, not only in write(). This looks redundant with the same
+        # line below, but the write runs on a worker thread that may start much
+        # later under load: without this the timestamp records when the thread
+        # got around to it rather than when the event happened.
         record.setdefault("ts", datetime.now(timezone.utc).isoformat())
         try:
             await asyncio.to_thread(self.write, record)
@@ -338,7 +352,16 @@ CANARYTOKENS_RETRY_COOLDOWN_SECS = float(os.environ.get("HB_CANARYTOKENS_RETRY_C
 # capping by serving count too bounds that anonymity set directly, which is
 # the variable that actually determines how many suspects there are, rather
 # than relying solely on elapsed time.
-CANARYTOKENS_MAX_SERVINGS = int(os.environ.get("HB_CANARYTOKENS_MAX_SERVINGS", 30))
+# Traffic-dependent, so it stays configurable: MAX_SERVINGS x 86400/COOLDOWN is
+# the ceiling on live servings per day (8,640 at the defaults), and a busier host
+# starves live coverage without headroom. It is not a throughput knob, though.
+# Past ~100 a real-world trigger implicates enough visitors that the alert stops
+# identifying anyone, so the configured value is clamped and the effective
+# ceiling is logged at startup.
+CANARYTOKENS_MAX_SERVINGS_LIMIT = 100
+CANARYTOKENS_MAX_SERVINGS = min(
+    int(os.environ.get("HB_CANARYTOKENS_MAX_SERVINGS", 30)),
+    CANARYTOKENS_MAX_SERVINGS_LIMIT)
 
 _live_aws_lock = asyncio.Lock()
 _live_aws_cache: dict | None = None
@@ -548,15 +571,18 @@ def current_variant_name(path: str) -> str | None:
     return ROUTE_VARIANT.get(path)
 
 
-def apply_variant_headers(resp: Response, path: str) -> None:
-    name = current_variant_name(path)
-    if not name:
-        return
+def _apply_variant(resp: Response, name: str) -> None:
     v = VARIANTS[name]
     if v["server"]:
         resp.headers["Server"] = v["server"]
     if v["x_powered_by"]:
         resp.headers["X-Powered-By"] = v["x_powered_by"]
+
+
+def apply_variant_headers(resp: Response, path: str) -> None:
+    name = current_variant_name(path)
+    if name:
+        _apply_variant(resp, name)
 
 
 # CVE_SIGNATURES and TOOL_INVOCATION_SIGNATURES now live in signatures.py,
@@ -815,8 +841,7 @@ async def _read_capped_body(request: Request) -> tuple[bytes, bool]:
 async def telemetry_mw(request: Request, call_next):
     _request_id_ctx.set(uuid.uuid4().hex)
     hdrs, hdrs_raw = _headers_first_wins(request)
-    ip = hdrs.get("x-forwarded-for", "").split(",")[0].strip() or (
-        request.client.host if request.client else "")
+    ip = client_ip(hdrs, request.client.host if request.client else "")
 
     # The container healthcheck polls /healthz from loopback every 60s — ~1,440
     # hits/day against a real-traffic baseline of a few hundred, which would
@@ -826,12 +851,12 @@ async def telemetry_mw(request: Request, call_next):
     if request.url.path == "/healthz" and not hdrs.get("x-forwarded-for"):
         return await call_next(request)
 
-    def base_rec(status: int, route_kind: str) -> dict:
+    async def log_request(status: int, route_kind: str, **body_fields) -> None:
         # Every field below is attacker-controlled. Each one is bounded here,
         # and JsonlWriter bounds the assembled record again: an unbounded
         # field is a way to fill the disk, and a full disk stops collection
         # while the service goes on answering 200s.
-        return {
+        await alog({
             "event": "request", "window": WINDOW_LABEL, "ip": ip,
             "xff": _cap(hdrs.get("x-forwarded-for", ""), XFF_CAP),
             "ua": _cap(hdrs.get("user-agent", ""), UA_CAP),
@@ -848,16 +873,16 @@ async def telemetry_mw(request: Request, call_next):
             "header_count": len(hdrs_raw),
             "headers": _headers_for_log(hdrs),
             "status_served": status, "route_kind": route_kind,
-        }
+            # Body fields land last so JSON key order stays stable: these lines
+            # are the published data format.
+            **body_fields,
+        })
 
     if _rate_limited(ip):
         # Skip the (relatively costly) body read on a flood, but still log
         # the hit — a silent gap here would be exactly the burst traffic
         # SPEC §8's cadence analysis most needs to see.
-        rec = base_rec(429, "rate-limited")
-        rec["body_len"] = 0
-        rec["body_excerpt"] = ""
-        await alog(rec)
+        await log_request(429, "rate-limited", body_len=0, body_excerpt="")
         # Reuse detection used to sit below this early return, so a replayed
         # honeytoken was invisible for the entire duration of a burst. That is
         # backwards: a credential replay characteristically arrives as a
@@ -876,14 +901,10 @@ async def telemetry_mw(request: Request, call_next):
     raw, exceeded = await _read_capped_body(request)
     await _check_honeytoken_reuse(request.url.path, str(request.url.query), raw, hdrs)
     if exceeded:
-        rec = base_rec(413, "catch-all")
-        # The true size is unknown past the abort point. Recording BODY_CAP + 1
-        # as `body_len` stated a specific length that was never measured; name
-        # the field for what it actually is instead.
-        rec["body_len_at_least"] = len(raw)
-        rec["body_truncated"] = True
-        rec["body_excerpt"] = ""
-        await alog(rec)
+        # The true size is unknown past the abort point, so the field is named
+        # for what was actually measured.
+        await log_request(413, "catch-all", body_len_at_least=len(raw),
+                          body_truncated=True, body_excerpt="")
         await check_attack_patterns(request.url.path, str(request.url.query),
                                     raw.decode("utf-8", "replace"), hdrs,
                                     body_available=False, headers_raw=hdrs_raw)
@@ -906,13 +927,10 @@ async def telemetry_mw(request: Request, call_next):
     body_excerpt = body[:BODY_EXCERPT_CAP].decode("utf-8", "replace")
     if getattr(request.state, "sensitive_body", False):
         body_excerpt = f"<redacted:credential-submission:len={len(body)}>"
-    rec = base_rec(resp.status_code, getattr(request.state, "route_kind", "catch-all"))
-    rec["body_len"] = len(raw)
-    rec["body_excerpt"] = body_excerpt
     creds = getattr(request.state, "creds_submitted", None)
-    if creds is not None:
-        rec["creds_submitted"] = creds
-    await alog(rec)
+    await log_request(resp.status_code, getattr(request.state, "route_kind", "catch-all"),
+                      body_len=len(raw), body_excerpt=body_excerpt,
+                      **({"creds_submitted": creds} if creds is not None else {}))
 
     # Detection scans the complete bounded body (<=64KB), while the general
     # request record retains only its 4KB excerpt. This closes the easy evasion
@@ -923,13 +941,21 @@ async def telemetry_mw(request: Request, call_next):
     return resp
 
 
+def client_ip(headers, fallback: str = "") -> str:
+    """The reported client address: first X-Forwarded-For hop, else `fallback`.
+
+    One definition, because rec["ip"] and every derived event have to agree.
+    """
+    return headers.get("x-forwarded-for", "").split(",")[0].strip() or fallback
+
+
 def sess_of(request: Request) -> str:
     # No cookie-based session tracking: scanners essentially never retain
     # cookies, and a fresh honeytoken per hit is *more* attributable, not
     # less (SPEC §5's "unique per route/session" is satisfied trivially when
     # every hit is its own session). Use ip+ua as the grouping key for the
     # log/analysis layer instead of minting server-side session state.
-    return f"{request.headers.get('x-forwarded-for','').split(',')[0].strip()}|{request.headers.get('user-agent','')}"
+    return f"{client_ip(request.headers)}|{request.headers.get('user-agent', '')}"
 
 
 def mark(request: Request, kind: str) -> None:
@@ -994,11 +1020,9 @@ def _decode_credential_fields(body: bytes, content_type: str) -> tuple[str, str]
                       for k, v in parse_qs(text, keep_blank_values=True).items()}
         except Exception:
             return None
-    secret = next((fields[k] for k in fields if k in CREDENTIAL_FIELD_NAMES), None)
-    if secret is None:
-        return None
+    secret = next((fields[k] for k in fields if k in CREDENTIAL_FIELD_NAMES), "")
     identity = next((fields[k] for k in fields if k in IDENTITY_FIELD_NAMES), "")
-    return identity, secret
+    return (identity, secret) if (identity or secret) else None
 
 
 def infer_credential_submission(request: Request, body: bytes) -> None:
@@ -1020,10 +1044,22 @@ def infer_credential_submission(request: Request, body: bytes) -> None:
     if getattr(request.state, "creds_submitted", None) is not None:
         return
     found = _decode_credential_fields(body, request.headers.get("content-type", ""))
-    if found is None:
+    if not found or not found[1]:   # an identity with no secret is not a submission
         return
-    identity, secret = found
-    mark_credential_submission(request, identity, secret, source="body-inferred")
+    mark_credential_submission(request, *found, source="body-inferred")
+
+
+def mark_panel_credentials(request: Request) -> None:
+    """Record a panel login POST's credential shape, without retaining values.
+
+    Field names come from signatures.CREDENTIAL_FIELD_NAMES/IDENTITY_FIELD_NAMES,
+    so a panel handler cannot recognise a field the generic inference path misses,
+    or vice versa. Each panel used to carry its own parser and its own idea of
+    which field names counted.
+    """
+    user, pw = _decode_credential_fields(
+        request.state.body, request.headers.get("content-type", "")) or ("", "")
+    mark_credential_submission(request, user, pw)
 
 
 HEALTH_MIN_FREE_BYTES = int(os.environ.get("HB_HEALTH_MIN_FREE_BYTES", 512 * 1024 * 1024))
@@ -1326,20 +1362,7 @@ async def admin_login_form(request: Request):
 @app.post("/admin/login")
 async def admin_login_submit(request: Request):
     mark(request, "admin")
-    body = request.state.body
-    ct = request.headers.get("content-type", "")
-    user = pw = ""
-    try:
-        if "application/json" in ct:
-            data = json.loads(body or b"{}")
-            user, pw = str(data.get("username", data.get("user", ""))), str(data.get("password", data.get("pass", "")))
-        else:
-            data = parse_qs(body.decode("utf-8", "replace"))
-            user = (data.get("username") or data.get("user") or [""])[0]
-            pw = (data.get("password") or data.get("pass") or [""])[0]
-    except Exception:
-        pass
-    mark_credential_submission(request, user, pw)
+    mark_panel_credentials(request)
     resp = HTMLResponse(_LOGIN_FORM.format(meta="<!-- invalid credentials -->"), status_code=401)
     apply_variant_headers(resp, "/admin")
     return resp
@@ -1380,14 +1403,7 @@ async def wp_login_form(request: Request):
 @app.post("/wp-login.php")
 async def wp_login_submit(request: Request):
     mark(request, "admin")
-    body = request.state.body
-    try:
-        data = parse_qs(body.decode("utf-8", "replace"))
-        user = (data.get("log") or [""])[0]
-        pw = (data.get("pwd") or [""])[0]
-    except Exception:
-        user = pw = ""
-    mark_credential_submission(request, user, pw)
+    mark_panel_credentials(request)
     # Real WordPress renders the error INLINE at 200, not a 401/403 — matching
     # that is part of the fingerprint; a stuffing tool checking status code
     # alone would otherwise learn nothing from a non-200 response here.
@@ -1447,14 +1463,7 @@ async def phpmyadmin_form(request: Request):
 @app.post("/phpmyadmin/index.php")
 async def phpmyadmin_submit(request: Request):
     mark(request, "admin")
-    body = request.state.body
-    try:
-        data = parse_qs(body.decode("utf-8", "replace"))
-        user = (data.get("pma_username") or [""])[0]
-        pw = (data.get("pma_password") or [""])[0]
-    except Exception:
-        user = pw = ""
-    mark_credential_submission(request, user, pw)
+    mark_panel_credentials(request)
     error = '<div class="alert alert-danger" role="alert">#1045 Cannot log in to the MySQL server</div>'
     resp = HTMLResponse(_PHPMYADMIN_FORM.format(
         meta=VARIANTS["wordpress"]["meta"], error=error, token=_pma_token()))
@@ -1511,17 +1520,13 @@ async def adminer(request: Request):
     mark(request, "admin")
     error = ""
     if request.method == "POST":
-        try:
-            data = parse_qs(request.state.body.decode("utf-8", "replace"))
-            user = (data.get("auth[username]") or data.get("username") or [""])[0]
-            pw = (data.get("auth[password]") or data.get("password") or [""])[0]
-        except Exception:
-            user = pw = ""
-        mark_credential_submission(request, user, pw)
+        mark_panel_credentials(request)
         error = '<p class="error">Access denied for user</p>'
     resp = HTMLResponse(_ADMINER_FORM.format(error=error))
-    resp.headers["Server"] = "Apache/2.4.29 (Ubuntu)"
-    resp.headers["X-Powered-By"] = "PHP/7.2.24"
+    # Same LAMP stack as the WordPress bait; read the banner rather than
+    # restating it, so changing the variant cannot leave these routes
+    # advertising a version nothing else serves.
+    _apply_variant(resp, "wordpress")
     return resp
 
 
@@ -1596,8 +1601,7 @@ async def phpinfo(request: Request):
 <tr><td>DATABASE_URL</td><td>{html.escape(db_url)}</td></tr>
 </table></body></html>"""
     resp = HTMLResponse(body)
-    resp.headers["Server"] = "Apache/2.4.29 (Ubuntu)"
-    resp.headers["X-Powered-By"] = "PHP/7.2.24"
+    _apply_variant(resp, "wordpress")
     return resp
 
 
@@ -1654,53 +1658,33 @@ async def graphql(request: Request):
 # comparable in the same window; "/" is left rotating, unchanged, so its
 # existing multi-week timeline isn't disrupted.
 # --------------------------------------------------------------------------- #
-def _render_landing_html(variant: str, api_key: str) -> str:
-    return f"""<!doctype html><html><head><title>Portal</title>
-{VARIANTS[variant]['meta']}
+@app.get("/", response_class=HTMLResponse)
+@app.get("/app", response_class=HTMLResponse)
+@app.get("/site", response_class=HTMLResponse)
+@app.get("/legacy", response_class=HTMLResponse)
+async def landing(request: Request):
+    # cve-signal, not catch-all: this page's job is the fake-version banner
+    # (SPEC §4.3) as much as the leaked-key lure below.
+    #
+    # Known limitation (SPEC §5): a Maps key's "use" is a call to Google's own
+    # API, which we cannot intercept — same bare-key limitation as the AWS/
+    # GitHub/Stripe/OpenAI kinds. Reuse detection for this one relies solely
+    # on the value reappearing elsewhere (analyze.py's circumstantial-reuse
+    # scan), same as any other non-catcher-embedded kind.
+    mark(request, "cve-signal")
+    path = request.url.path
+    api_key = await honeytoken("google_api_key", sess_of(request), path)
+    resp = HTMLResponse(f"""<!doctype html><html><head><title>Portal</title>
+{VARIANTS[current_variant_name(path)]['meta']}
 </head><body>
 <h1>Welcome</h1>
 <p>Sign in to access your dashboard.</p>
 <script>
   window.__CONFIG__ = {{ mapsApiKey: "{api_key}", env: "production" }};
 </script>
-</body></html>"""
-
-
-async def _landing_page(request: Request, path: str) -> HTMLResponse:
-    # cve-signal, not catch-all: this page's job is the fake-version banner
-    # (SPEC §4.3) as much as the leaked-key lure below.
-    mark(request, "cve-signal")
-    s = sess_of(request)
-    # Known limitation (SPEC §5): a Maps key's "use" is a call to Google's own
-    # API, which we cannot intercept — same bare-key limitation as the AWS/
-    # GitHub/Stripe/OpenAI kinds. Reuse detection for this one relies solely
-    # on the value reappearing elsewhere (analyze.py's circumstantial-reuse
-    # scan), same as any other non-catcher-embedded kind.
-    api_key = await honeytoken("google_api_key", s, path)
-    variant = current_variant_name(path)
-    resp = HTMLResponse(_render_landing_html(variant, api_key))
+</body></html>""")
     apply_variant_headers(resp, path)
     return resp
-
-
-@app.get("/", response_class=HTMLResponse)
-async def landing(request: Request):
-    return await _landing_page(request, "/")
-
-
-@app.get("/app", response_class=HTMLResponse)
-async def landing_app(request: Request):
-    return await _landing_page(request, "/app")
-
-
-@app.get("/site", response_class=HTMLResponse)
-async def landing_site(request: Request):
-    return await _landing_page(request, "/site")
-
-
-@app.get("/legacy", response_class=HTMLResponse)
-async def landing_legacy(request: Request):
-    return await _landing_page(request, "/legacy")
 
 
 # --------------------------------------------------------------------------- #
@@ -1751,14 +1735,12 @@ async def trigger_catcher(request: Request, token: str):
     ident = token.lower()
     issued = (ident in _issued_token_ids
               or _issued_token_prefixes.get(ident[:TOKEN_PREFIX_LEN]) is not None)
-    ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
-        request.client.host if request.client else "")
     await alog({
         "event": "honeytoken_triggered" if issued else "catcher_probe_unissued",
         "token": token[:64],
         "index_size": len(_issued_token_ids),
         "index_evictions": _issued_token_evictions,
-        "ip": ip,
+        "ip": client_ip(request.headers, request.client.host if request.client else ""),
         "ua": _cap(request.headers.get("user-agent", ""), UA_CAP),
     })
     return PlainTextResponse("ok")

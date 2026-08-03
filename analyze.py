@@ -123,22 +123,27 @@ def truncate_ip(ip: str) -> str:
     return ip
 
 
+def ip_of(record) -> str:
+    """First X-Forwarded-For hop, matching client_ip() in app/main.py."""
+    return (record.get("ip") or "").split(",")[0].strip()
+
+
 def classify_ip(ip):
     # rDNS is a lookup per observed IP, which hands the honeypot's full visitor
     # list to whatever resolver chain is in front of you. Opt-in via --rdns.
     if not ip:
-        return ("", "unknown")
+        return "unknown"
     ip = ip.split(",")[0].strip()
     if not ARGS.rdns:
-        return (ip, "no-rdns")
+        return "no-rdns"
     try:
         ptr = socket.gethostbyaddr(ip)[0].lower()
     except Exception:
-        return (ip, "no-ptr")
+        return "no-ptr"
     for sub, name in CLOUD.items():
         if sub in ptr:
-            return (ip, f"cloud:{name}")
-    return (ip, f"other:{ptr.split('.')[-2] if '.' in ptr else ptr}")
+            return f"cloud:{name}"
+    return f"other:{ptr.split('.')[-2] if '.' in ptr else ptr}"
 
 
 def enrich(ips):
@@ -158,6 +163,10 @@ def enrich(ips):
             print(f"  (enrich failed: {e})", file=sys.stderr)
             break
     return out
+
+
+def first_index(paths, needle) -> int:
+    return next(i for i, p in enumerate(paths) if needle in p)
 
 
 def cadence(gaps):
@@ -250,7 +259,7 @@ def apply_filters(rows):
         if ARGS.window and r.get("window") not in (None, ARGS.window):
             dropped_window += 1
             continue
-        ip = (r.get("ip") or "").split(",")[0].strip()
+        ip = ip_of(r)
         if ip and ip in set(ARGS.exclude_ip):
             dropped_ip += 1
             continue
@@ -323,7 +332,7 @@ def main():
     else:
         print("excluded: none (pass --exclude-ip/--exclude-ua for self-test traffic)")
 
-    ips = Counter((r.get("ip") or "").split(",")[0].strip() for r in reqs)
+    ips = Counter(ip_of(r) for r in reqs)
     ips.pop("", None)
     print(f"distinct IPs: {len(ips)}")
 
@@ -377,8 +386,8 @@ def main():
 
     for a, b in [(".git/HEAD", ".git/config"), (".env", "wp-config.php")]:
         both = [r for r in sess_rows if any(a in p for p in r["paths"]) and any(b in p for p in r["paths"])]
-        a_first = sum(1 for r in both if next(i for i, p in enumerate(r["paths"]) if a in p) <
-                                          next(i for i, p in enumerate(r["paths"]) if b in p))
+        a_first = sum(1 for r in both
+                      if first_index(r["paths"], a) < first_index(r["paths"], b))
         print(f"   sessions hitting both '{a}' & '{b}': {len(both)} "
               f"({a}-first: {a_first}, {b}-first: {len(both)-a_first})")
 
@@ -390,7 +399,7 @@ def main():
         cve = r.get("cve_id", "?")
         info = live[cve]
         info["hits"] += 1
-        info["ips"].add((r.get("ip") or "").split(",")[0].strip())
+        info["ips"].add(ip_of(r))
         ts = r.get("ts", "")
         info["first"] = min(info["first"], ts) if info["first"] else ts
     print_cve_table("CVE hits — LIVE (what the deployed signatures flagged at the time):",
@@ -413,7 +422,7 @@ def main():
                 if pattern.search(haystacks.get(where, "")):
                     info = rescan[cve]
                     info["hits"] += 1
-                    info["ips"].add((r.get("ip") or "").split(",")[0].strip())
+                    info["ips"].add(ip_of(r))
                     ts = r.get("ts", "")
                     info["first"] = min(info["first"], ts) if info["first"] else ts
         print_cve_table("CVE hits — RESCAN (current signatures re-applied to retained records):",
@@ -482,7 +491,7 @@ def main():
             reuse_hits.append({"token": tok, "kind": issue.get("kind"),
                                "issued_route": issue.get("route"), "seen_path": path,
                                "seen_ts": ts, "matched": form,
-                               "seen_ip": (r.get("ip") or "").split(",")[0].strip()})
+                               "seen_ip": ip_of(r)})
 
     print(f"\ncircumstantial reuse hits (issued value reappearing later elsewhere): {len(reuse_hits)}")
     by_form = Counter(h["matched"] for h in reuse_hits)
@@ -529,7 +538,7 @@ def main():
     raw_tools = []
     for r in reqs:
         for tool, command in command_attempts(r):
-            raw_tools.append({"ts": r.get("ts", ""), "ip": (r.get("ip") or "").split(",")[0].strip(),
+            raw_tools.append({"ts": r.get("ts", ""), "ip": ip_of(r),
                               "path": r.get("path", ""), "tool": tool, "command": command,
                               "command_hash": hashlib.sha256(command.encode()).hexdigest()[:16]})
 
@@ -550,7 +559,7 @@ def main():
     tool_paths = {"/api/v1/system/status", "/api/v1/jobs/run"}
     discoveries, calls = defaultdict(list), defaultdict(list)
     for r in reqs:
-        key = ((r.get("ip") or "").split(",")[0].strip(), r.get("ua", ""))
+        key = (ip_of(r), r.get("ua", ""))
         if r.get("path") in discovery_paths:
             discoveries[key].append(r)
         if r.get("path") in tool_paths:
@@ -571,12 +580,10 @@ def main():
 
     # --- IP classification ---------------------------------------------------
     print("\nIP classification (top 50):")
-    ipinfo = {ip: classify_ip(ip) for ip in ips}
     geo = enrich(list(ips)) if ARGS.enrich else {}
     for ip, n in ips.most_common(50):
-        _, cls = ipinfo[ip]
         extra = f"  [{geo[ip]}]" if geo.get(ip) else ""
-        print(f"   {n:>6}  {truncate_ip(ip):<22} {cls}{extra}")
+        print(f"   {n:>6}  {truncate_ip(ip):<22} {classify_ip(ip)}{extra}")
 
     # --- catch-all -----------------------------------------------------------
     print("\ntop catch-all (404) paths probed but not baited:")

@@ -70,9 +70,7 @@ def db_connection_string(tok: str, catcher_url: str | None) -> str:
     # Fake, non-resolvable internal host — a connection attempt just fails
     # (no real backend to exploit); reuse detection relies on the value
     # reappearing elsewhere (SPEC §5).
-    user = "app"
-    pw = tok[:12]
-    return f"postgres://{user}:{pw}@db.internal-prod.local:5432/app"
+    return f"postgres://app:{tok[:12]}@db.internal-prod.local:5432/app"
 
 
 def jwt(tok: str, catcher_url: str | None) -> str:
@@ -160,11 +158,7 @@ def served_run_len(kind: str, tok: str, catcher_url: str | None = None) -> int:
     """Longest leading slice of `tok` that appears verbatim in this kind's
     output, lowercased. The ground truth SERVED_TOKEN_LEN is checked against."""
     value = FORMATTERS[kind](tok, catcher_url)
-    if isinstance(value, dict):
-        text = json.dumps(value)
-    else:
-        text = str(value)
-    text = text.lower()
+    text = (json.dumps(value) if isinstance(value, dict) else str(value)).lower()
     best = 0
     for n in range(1, len(tok) + 1):
         if tok[:n].lower() in text:

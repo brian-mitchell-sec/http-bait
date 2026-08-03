@@ -1,23 +1,18 @@
 import json
 import os
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import main   # conftest.py binds HB_LOG_DIR and sys.path before this import
 
-_TMP = tempfile.TemporaryDirectory()
-os.environ["HB_LOG_DIR"] = _TMP.name
-sys.path.insert(0, str(Path(__file__).parent))
-
-import main  # noqa: E402  (environment must be set before app construction)
+LOGDIR = Path(os.environ["HB_LOG_DIR"])
 
 
 class HttpBaitTests(unittest.TestCase):
     def setUp(self):
-        self.events = Path(_TMP.name) / "http_events.jsonl"
+        self.events = LOGDIR / "http_events.jsonl"
         self.events.unlink(missing_ok=True)
         self.client = TestClient(main.app)
 
