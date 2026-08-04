@@ -84,6 +84,7 @@ costs unless you opt into live canary tokens (below).
 | `HB_CANARYTOKENS_REFRESH_SECS` | `86400` | Max age of a minted live key before re-minting. |
 | `HB_CANARYTOKENS_MAX_SERVINGS` | `30` | Max visitors served one live key before re-minting, and therefore the size of the set a real-world trigger narrows to. Clamped to 100. It interacts with the cooldown: `MAX_SERVINGS × 86400 / RETRY_COOLDOWN_SECS` is the ceiling on live servings per day (8,640 at the defaults), so a busier host needs headroom or visitors silently get synthetic keys. The effective values are logged at startup as `canary_config`. |
 | `HB_CANARYTOKENS_RETRY_COOLDOWN_SECS` | `300` | Floor between mint attempts against canarytokens.org. |
+| `HB_OPERATOR_CONTACT` | unset | Address published in `/.well-known/security.txt` and the plugin manifest. Unset means the file says so explicitly rather than naming a placeholder nobody reads. |
 | `HB_WINDOW_LABEL` | `unlabelled` | Tags every record with a collection window. Change it whenever the population changes, and **before publishing anything about a deployment**: readers arriving from a writeup are not organic scanner traffic, and mixing them invalidates every rate. `analyze.py --window <label>` then separates them. |
 
 ## The one thing that isn't fake
@@ -141,11 +142,11 @@ Read [SPEC.md §2](SPEC.md) before deploying. The short version, all of it load-
   illegal action or walks a visitor toward one.
 - **Visitor credentials are not retained.** Anything submitted to any route is recorded
   as presence and shape only, because credentials sprayed at honeypots are frequently
-  real credentials stolen from someone else. This is enforced in the middleware for
-  every request rather than per handler: an earlier version applied it only to the four
-  registered panel routes, so a POST to any other path was stored verbatim. Values of
-  credential-bearing headers are likewise reduced to a length and an ephemeral HMAC.
-  See [DATA-HANDLING.md](DATA-HANDLING.md).
+  real credentials stolen from someone else. Enforced in the middleware for every
+  request rather than per handler, across form-encoded, JSON at any depth, multipart,
+  query strings, and a pattern fallback for anything else. Values of credential-bearing
+  headers are likewise reduced to a length and an ephemeral HMAC. See
+  [DATA-HANDLING.md](DATA-HANDLING.md).
 - **Coordinate disclosure.** If you catch a *named* vendor or tool doing something
   disclosure-worthy, tell them before you publish specifics.
 
@@ -161,6 +162,7 @@ app/signatures.py       Detection tables, shared with analyze.py so the two cann
 app/test_main.py        Behaviour tests (redaction, caps, non-retention)
 app/test_regressions.py Regression tests for previously-broken detectors
 analyze.py              Offline JSONL analyzer (stdlib only)
+NOTICE                  Third-party terms, including the JA4+ commercial-use restriction
 gen_detectors.py        Regenerates DETECTORS.md from the signature tables
 fixtures/               Synthetic log plus the exact report the analyzer prints for it
 Caddyfile               TLS reverse proxy with JA4/JA4H fingerprinting
@@ -178,4 +180,10 @@ AGENTS.md               Machine-readable setup, commands, and hard constraints
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT for the code in this repository, see [LICENSE](LICENSE).
+
+The Caddy image built by `caddy/Dockerfile` links JA4+ fingerprinting, which is
+distributed under the **FoxIO License 1.1** and restricts commercial use. That
+term reaches you as a downstream recipient and is not relicensed by the MIT
+grant above. See [NOTICE](NOTICE), which also explains how to drop the
+dependency if the restriction is a problem for you.

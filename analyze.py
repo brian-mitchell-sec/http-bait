@@ -29,6 +29,7 @@ traffic.
 import argparse
 import hashlib
 import json
+import ipaddress
 import os
 import re
 import socket
@@ -83,6 +84,13 @@ def build_parser():
                    help="Drop records from this IP (repeatable). Use for self-test traffic.")
     p.add_argument("--exclude-ua", action="append", default=[],
                    help="Drop records whose User-Agent contains this substring (repeatable)")
+    p.add_argument("--show-payloads", action="store_true",
+                   help="Print attacker-supplied text (User-Agents, probed paths, "
+                        "GraphQL queries, parsed commands) verbatim. Off by default: "
+                        "that text is third-party-controlled and routinely carries "
+                        "credentials, URLs and email addresses, so default output is "
+                        "safe to paste into a report and this flag is for private "
+                        "analysis only")
     p.add_argument("--full-ips", action="store_true",
                    help="Print full addresses instead of /24-truncated ones")
     p.add_argument("--enrich", action="store_true",
@@ -94,7 +102,7 @@ def build_parser():
     return p
 
 
-ARGS = argparse.Namespace(rdns=False, enrich=False, full_ips=False)
+ARGS = argparse.Namespace(rdns=False, enrich=False, full_ips=False, show_payloads=False)
 
 
 def variant_for(path: str, ts_iso: str) -> str:
@@ -116,11 +124,44 @@ def truncate_ip(ip: str) -> str:
     ip = (ip or "").split(",")[0].strip()
     if ARGS.full_ips or not ip:
         return ip
-    if ip.count(".") == 3:
-        return ".".join(ip.split(".")[:3]) + ".0/24"
-    if ":" in ip:                       # IPv6 -> /48
-        return ":".join(ip.split(":")[:3]) + "::/48"
-    return ip
+    try:
+        # String splitting produced invalid output on any compressed address:
+        # 2001:db8::1 became "2001:db8:::/48" and ::1 became "::1::/48".
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return "<unparseable>"
+    prefix = 24 if addr.version == 4 else 48
+    return str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False))
+
+
+_URL_RE = re.compile(r"https?://\S+", re.I)
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{24,}")
+_SECRETISH_RE = re.compile(
+    r"(?i)\b(pass|passwd|password|pwd|secret|token|key|api[_-]?key|auth|sig|"
+    r"signature|credential|bearer)\b\s*[:=]\s*[^\s&;]+")
+
+
+def safe(text: str, width: int = 60) -> str:
+    """Attacker-supplied text, reduced to something safe to paste into a report.
+
+    Everything printed from a request is third-party-controlled. A User-Agent
+    carries whatever the sender put there, a probed path carries whatever was in
+    the URL including query parameters, and a GraphQL body carries arguments.
+    Any of those can hold a credential belonging to someone who is not the
+    sender. Default output therefore strips URLs, email addresses, long
+    token-shaped runs and key=value secrets, then truncates. `--show-payloads`
+    prints the original for private analysis.
+    """
+    text = str(text or "")
+    if ARGS.show_payloads:
+        return text[:width * 4]
+    text = _SECRETISH_RE.sub(lambda m: m.group(0).split("=")[0].split(":")[0] + "=<redacted>", text)
+    text = _URL_RE.sub("<url>", text)
+    text = _EMAIL_RE.sub("<email>", text)
+    text = _LONG_TOKEN_RE.sub("<token>", text)
+    text = "".join(c if c.isprintable() else "." for c in text)
+    return text[:width] + ("…" if len(text) > width else "")
 
 
 def ip_of(record) -> str:
@@ -256,7 +297,11 @@ def apply_filters(rows):
     """
     kept, dropped_ip, dropped_ua, dropped_window = [], 0, 0, 0
     for r in rows:
-        if ARGS.window and r.get("window") not in (None, ARGS.window):
+        # An unlabelled record is dropped when a window is requested, rather
+        # than kept. Keeping it meant derived events written before windows
+        # existed survived every filter, so a report scoped to one window still
+        # carried issuances, triggers and reuse hits from outside it.
+        if ARGS.window and r.get("window") != ARGS.window:
             dropped_window += 1
             continue
         ip = ip_of(r)
@@ -271,15 +316,31 @@ def apply_filters(rows):
     return kept, {"ip": dropped_ip, "ua": dropped_ua, "window": dropped_window}
 
 
-def print_cve_table(title, per_cve, since_by_cve):
+def print_cve_table(title, per_cve, since_by_cve, kind_by_cve):
+    """Payload-bearing attempts and path probes, reported separately.
+
+    A single combined count is the number people quote, and it is the one that
+    does not survive scrutiny: reaching /vendor/phpunit/.../eval-stdin.php with
+    no body is a scanner checking whether PHPUnit is installed, not an attempt
+    to exploit CVE-2017-9841.
+    """
     print(f"\n{title}")
     if not per_cve:
         print("   (none)")
         return
-    print(f"   {'cve_id':<22} {'hits':>5} {'IPs':>5}  {'first seen':<20} signature since")
-    for cve, info in sorted(per_cve.items(), key=lambda kv: -kv[1]["hits"]):
-        print(f"   {cve:<22} {info['hits']:>5} {len(info['ips']):>5}  "
-              f"{info['first']:<20} {since_by_cve.get(cve, '?')}")
+    for kind, heading in (("exploit", "payload-bearing exploit attempts"),
+                          ("probe", "vulnerability probes (path/marker only)")):
+        rows = {c: i for c, i in per_cve.items() if kind_by_cve.get(c) == kind}
+        total = sum(i["hits"] for i in rows.values())
+        print(f"   {heading}: {total} hit(s) across {len(rows)} signature(s)")
+        if not rows:
+            continue
+        print(f"     {'id':<22} {'hits':>5} {'IPs':>5} {'w/body':>7}  {'first seen':<26} since")
+        for cve, info in sorted(rows.items(), key=lambda kv: -kv[1]["hits"]):
+            print(f"     {cve:<22} {info['hits']:>5} {len(info['ips']):>5} "
+                  f"{info['with_body']:>7}  {info['first']:<26} {since_by_cve.get(cve, '?')}")
+    print("   Quote the two separately. `w/body` counts probe hits that did carry a")
+    print("   body, which is the subset worth reviewing by hand for promotion.")
 
 
 def main():
@@ -364,7 +425,7 @@ def main():
                 pass
         gaps = [(ts[i + 1] - ts[i]).total_seconds() for i in range(len(ts) - 1)] if len(ts) > 1 else []
         dur = (ts[-1] - ts[0]).total_seconds() if len(ts) > 1 else 0.0
-        sess_rows.append({"ip": evs[0].get("ip", ""), "ua": (evs[0].get("ua") or "")[:32],
+        sess_rows.append({"ip": evs[0].get("ip", ""), "ua": safe(evs[0].get("ua"), 32),
                           "n": len(evs), "dur": dur, "cadence": cadence(gaps),
                           "paths": [r.get("path", "") for r in evs]})
 
@@ -372,7 +433,7 @@ def main():
     print(f"   {'ip':<20} {'ua':<34} {'n':>4} {'dur(s)':>8} {'cadence':<16} first paths")
     for r in sorted(sess_rows, key=lambda r: -r["n"])[:30]:
         print(f"   {truncate_ip(r['ip']):<20} {r['ua']:<34} {r['n']:>4} {r['dur']:>8.1f} "
-              f"{r['cadence']:<16} {r['paths'][:8]}")
+              f"{r['cadence']:<16} {[safe(x, 40) for x in r['paths'][:8]]}")
 
     print("\ncadence distribution:")
     for c, n in Counter(r["cadence"] for r in sess_rows).most_common():
@@ -382,7 +443,7 @@ def main():
     print("\nsecret-file path hit counts (route_kind=secret-file):")
     for p, n in Counter(r.get("path", "") for r in reqs
                         if r.get("route_kind") == "secret-file").most_common():
-        print(f"   {n:>6}  {p}")
+        print(f"   {n:>6}  {safe(p, 80)}")
 
     for a, b in [(".git/HEAD", ".git/config"), (".env", "wp-config.php")]:
         both = [r for r in sess_rows if any(a in p for p in r["paths"]) and any(b in p for p in r["paths"])]
@@ -392,18 +453,20 @@ def main():
               f"({a}-first: {a_first}, {b}-first: {len(both)-a_first})")
 
     # --- CVE: live counts, then optional rescan ------------------------------
-    since_by_cve = {cve: since for cve, _pat, _where, since in CVE_SIGNATURES}
+    since_by_cve = {cve: since for cve, _p, _w, since, _k in CVE_SIGNATURES}
 
-    live = defaultdict(lambda: {"hits": 0, "ips": set(), "first": ""})
+    kind_by_cve = {cve: kind for cve, _p, _w, _s, kind in CVE_SIGNATURES}
+
+    live = defaultdict(lambda: {"hits": 0, "ips": set(), "first": "", "with_body": 0})
     for r in cve_hits:
-        cve = r.get("cve_id", "?")
-        info = live[cve]
+        info = live[r.get("cve_id", "?")]
         info["hits"] += 1
         info["ips"].add(ip_of(r))
+        info["with_body"] += 1 if r.get("body_present") else 0
         ts = r.get("ts", "")
         info["first"] = min(info["first"], ts) if info["first"] else ts
     print_cve_table("CVE hits — LIVE (what the deployed signatures flagged at the time):",
-                    live, since_by_cve)
+                    live, since_by_cve, kind_by_cve)
 
     print("\ncve_pattern_match by advertised-version variant:")
     for v, n in Counter(variant_for(r.get("path", ""), r.get("ts", ""))
@@ -415,18 +478,20 @@ def main():
         # implementation: the old code only tallied cve_pattern_match events
         # that the service had already written, so it could never surface
         # traffic that predated a signature.
-        rescan = defaultdict(lambda: {"hits": 0, "ips": set(), "first": ""})
+        rescan = defaultdict(lambda: {"hits": 0, "ips": set(), "first": "", "with_body": 0})
         for r in reqs:
             haystacks = request_text(r)
-            for cve, pattern, where, _since in CVE_SIGNATURES:
+            has_body = bool((r.get("body_excerpt") or "").strip())
+            for cve, pattern, where, _since, _kind in CVE_SIGNATURES:
                 if pattern.search(haystacks.get(where, "")):
                     info = rescan[cve]
                     info["hits"] += 1
                     info["ips"].add(ip_of(r))
+                    info["with_body"] += 1 if has_body else 0
                     ts = r.get("ts", "")
                     info["first"] = min(info["first"], ts) if info["first"] else ts
         print_cve_table("CVE hits — RESCAN (current signatures re-applied to retained records):",
-                        rescan, since_by_cve)
+                        rescan, since_by_cve, kind_by_cve)
         print("   NOTE: a rescan sees only what was retained. Request bodies are")
         print("   capped and only a 4KB excerpt is stored, and sensitive headers")
         print("   are redacted at write time, so this is a lower bound.")
@@ -529,7 +594,7 @@ def main():
     # --- graphql -------------------------------------------------------------
     print(f"\ngraphql queries logged: {len(graphql_qs)}")
     for r in graphql_qs[:5]:
-        print(f"   {r.get('query','')[:120]}")
+        print(f"   {safe(r.get('query'), 120)}")
 
     # --- tool/agent signals --------------------------------------------------
     raw_rsc = [r for r in reqs if rsc_probe(r)]
@@ -551,7 +616,7 @@ def main():
     print(f"   derived tool/API call events: {len(logged_tools)}")
     for r in raw_tools[:20]:
         print(f"   {r['ts']} {truncate_ip(r['ip']):<20} {r['tool']:<30} "
-              f"{r['command']!r} sha256:{r['command_hash']}")
+              f"{safe(r['command'], 80)!r} sha256:{r['command_hash']}")
 
     # The agent-bait surface: a client that fetched a machine-readable API
     # description and then called an operation it advertised.
@@ -576,7 +641,7 @@ def main():
     print(f"   schema-discovery -> advertised-operation chains: {len(chains)}")
     for (ip, ua), d, c in chains[:10]:
         print(f"   {truncate_ip(ip):<20} {d.get('path')} -> {c.get('method')} {c.get('path')} "
-              f"({ua[:40]})")
+              f"({safe(ua, 40)})")
 
     # --- IP classification ---------------------------------------------------
     print("\nIP classification (top 50):")
@@ -590,7 +655,7 @@ def main():
     catch = Counter(r.get("path", "") for r in reqs
                     if r.get("route_kind") == "catch-all" and r.get("status_served") == 404)
     for p, n in catch.most_common(30):
-        print(f"   {n:>6}  {p}")
+        print(f"   {n:>6}  {safe(p, 80)}")
     return 0
 
 

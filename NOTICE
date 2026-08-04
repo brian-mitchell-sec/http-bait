@@ -1,0 +1,34 @@
+http-bait
+Copyright (c) 2026 brian-mitchell-sec
+
+This product includes software developed by third parties. The MIT licence in
+LICENSE covers the code in this repository. It does NOT relicense the
+dependencies below, which carry their own terms and reach you under them.
+
+--------------------------------------------------------------------------------
+JA4+ fingerprinting (built into the Caddy image by caddy/Dockerfile)
+
+  github.com/matt-/caddy-ja4
+  github.com/lum8rjack/caddy-ja4h
+
+These implement the JA4+ suite originated by FoxIO, LLC. The JA4 method and the
+JA4+ specification are distributed under the FoxIO License 1.1, which permits
+research and internal use but restricts commercial use, including offering the
+fingerprinting capability as part of a paid product or service, without a
+licence from FoxIO.
+
+  https://github.com/FoxIO-LLC/ja4/blob/main/LICENSE-JA4
+  https://github.com/lum8rjack/caddy-ja4h/blob/main/NOTICE
+
+If you deploy the Caddy image built by caddy/Dockerfile, or redistribute it, the
+FoxIO terms apply to you. Running this honeypot as personal or academic research
+is within them. Building a commercial product on the fingerprints it collects is
+not, absent a licence.
+
+To avoid the dependency entirely, remove the two `--with` lines from
+caddy/Dockerfile and use a stock Caddy image. The service degrades gracefully:
+`ja4` and `ja4h` are recorded as empty strings and nothing else changes.
+
+--------------------------------------------------------------------------------
+Python dependencies (app/requirements.txt) are installed at build time and are
+not redistributed by this repository. Each carries its own licence.

