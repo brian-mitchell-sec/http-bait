@@ -1,7 +1,15 @@
 # Findings
 
 <!--
-TEMPLATE. This file ships empty on purpose.
+TEMPLATE. Do not fill this file in.
+
+  cp FINDINGS.md FINDINGS.local.md
+
+`*.local.md` is gitignored, so your results stay out of the repository. Editing
+this file instead means git reports it modified and `git add -A` will eventually
+commit your deployment's data.
+
+This file ships empty on purpose.
 
 Findings belong to a deployment, not to the software. Every number is a property
 of one host, one hostname, one window, and whichever scanner population happened
@@ -17,8 +25,9 @@ claimed. Do not populate this file from fixtures/ — those are synthetic and
 exist to test the analyzer, not to describe anything real.
 -->
 
-> **Status: no deployment recorded.** This is the template. Replace everything
-> below once you have run the honeypot and analyzed your own logs.
+> **Status: no deployment recorded.** This is the template. Copy it to
+> `FINDINGS.local.md` and fill that in once you have run the honeypot and
+> analyzed your own logs.
 
 ## Deployment
 

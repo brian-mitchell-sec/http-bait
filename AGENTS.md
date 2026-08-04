@@ -151,9 +151,13 @@ exist to keep documentation honest: the analyzer's output against
 
 ## Producing a findings report
 
-`FINDINGS.md` ships as an empty template and is filled in per deployment. Never
-populate it from `fixtures/` — that data is synthetic and exists to test the analyzer.
-Never carry another deployment's numbers into a fork.
+`FINDINGS.md` is a template. **Write to `FINDINGS.local.md`, never to `FINDINGS.md`.**
+`*.local.md` is gitignored; the template is tracked, so editing it in place puts a
+deployment's data one `git add -A` away from being published. The same suffix applies to
+any other operator-specific document you produce.
+
+Never populate a findings report from `fixtures/` — that data is synthetic and exists to
+test the analyzer. Never carry another deployment's numbers into a fork.
 
 1. Confirm the collection window is closed. `HB_WINDOW_LABEL` must not have been
    changed mid-window, and must be bumped before anything about this deployment is
@@ -166,7 +170,7 @@ Never carry another deployment's numbers into a fork.
    python analyze.py <log> --rescan --window <label> --exclude-ip <self-test ip>
    ```
 
-4. Paste that output into the Summary block verbatim. Do not hand-edit numbers into
+4. Paste that output into `FINDINGS.local.md`'s Summary block verbatim. Do not hand-edit numbers into
    prose without leaving the block they came from.
 5. Work through every caveat in the template before writing a single conclusion.
 
