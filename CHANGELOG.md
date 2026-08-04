@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.1.1 — 2026-08-04
+
+Fixes for defects found in review after v0.1.0 was tagged. **v0.1.0 ships a
+credential-retention defect and should not be deployed or cited.**
+
+- **Credential redaction covers every request shape.** v0.1.0 handled flat
+  form-encoded bodies and flat top-level JSON only; nested JSON, JSON arrays,
+  XML, multipart and query strings were written to the log verbatim while the
+  documentation claimed otherwise. Query strings leaked in the `query` field as
+  well as the body.
+- **Exploit attempts and vulnerability probes are counted separately.** A
+  path-only signature cannot observe a payload, so reaching
+  `/vendor/phpunit/.../eval-stdin.php` is reconnaissance rather than an exploit
+  attempt. Any figure of the form "N exploit attempts across M CVEs" produced
+  before this needs regenerating; the denominator changes.
+- **Every record carries its collection window**, and issuances carry `ip`, so
+  `--window` and `--exclude-ip` reach derived events. Previously a report scoped
+  to one window silently kept issuances, triggers and reuse hits from outside it.
+- **The live canary registers its catcher token after minting**, so the
+  creation-time webhook canarytokens.org sends to validate the URL is no longer
+  recorded as a confirmed trigger.
+- **Analyzer output is sanitized by default.** User-Agents, probed paths,
+  GraphQL text and parsed commands are attacker-controlled; `--show-payloads`
+  opts back in for private analysis. IPv6 anonymization uses
+  `ipaddress.ip_network` and no longer emits invalid networks.
+- `HB_OPERATOR_CONTACT` replaces the placeholder address in `security.txt`.
+- `NOTICE` records the FoxIO License 1.1 restriction on the JA4+ fingerprinting
+  built into the Caddy image, which the MIT grant does not relicense.
+
+Tests 33 to 55.
+
 ## v0.1.0 — 2026-08-03
 
 First tagged release. Everything below landed in one pass after a review of the initial
