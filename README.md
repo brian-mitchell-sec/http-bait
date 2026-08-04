@@ -22,8 +22,9 @@ rather than to an individual. See [the canary section](#the-one-thing-that-isnt-
 ## What it measures
 
 Findings belong to a deployment, not to this repository, so none ship here.
-[FINDINGS.md](FINDINGS.md) is an empty template with the caveats you are expected to
-work through before quoting any number you produce; fill it in from your own logs.
+[FINDINGS.md](FINDINGS.md) is a template carrying the caveats you are expected to work
+through before quoting any number you produce. Copy it to `FINDINGS.local.md`, which is
+gitignored, and fill that in from your own logs.
 
 The reason those caveats are the longest section of the template is that the hardest
 problem with an instrument like this is not collecting data, it is knowing whether a
@@ -168,7 +169,7 @@ docker-compose.local.yml App only, loopback, no TLS — for running it on your m
 deploy.sh               Push to a host and bring the stack up
 pull-telemetry.sh       Fetch logs back for offline analysis
 SPEC.md                 Design spec: what each piece is for, which constraints are load-bearing
-FINDINGS.md             Empty template: fill in from your own deployment's logs
+FINDINGS.md             Template; copy to FINDINGS.local.md (gitignored) and fill that
 DETECTORS.md            Generated signature timeline: what could have fired, and since when
 DATA-HANDLING.md        What is recorded, what is discarded, what you inherit as operator
 SECURITY.md             Reporting and data-removal contact

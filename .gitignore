@@ -1,3 +1,9 @@
+# Deployment-specific documents. Templates are tracked; the copy you actually
+# fill in carries a .local.md suffix and is never committed. A tracked file
+# cannot be gitignored, which is why the filled copy needs its own name rather
+# than an ignore rule on the template.
+*.local.md
+
 # Runtime telemetry. Contains third-party IP addresses — never commit.
 data/
 *.jsonl

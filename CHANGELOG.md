@@ -6,13 +6,11 @@ First tagged release. Everything below landed in one pass after a review of the 
 public drop. Several items change what the tooling reports, so any figure produced by an
 earlier version has to be regenerated before it is cited.
 
-**`FINDINGS.md` is now an empty template.** It previously shipped one deployment's
-results in a repository other people fork, which handed a forker an authoritative-looking
-document describing traffic they never received, and tangled the operator's research up
-with the tool's documentation. Findings belong to a deployment. The template keeps the
-part that generalizes, which is the list of caveats you have to work through before
-quoting any number, and `AGENTS.md` gained a "Producing a findings report" section with
-the commands and the rules about what may be claimed.
+**`FINDINGS.md` is a template now.** Results belong to a deployment while the code
+travels to whoever forks it, so the repository ships the part that generalizes: the list
+of caveats to work through before quoting any number. Fill in a copy at
+`FINDINGS.local.md`, which is gitignored. `AGENTS.md` gained a "Producing a findings
+report" section with the commands and the rules about what may be claimed.
 
 ### Privacy and data handling
 
@@ -64,22 +62,21 @@ the commands and the rules about what may be claimed.
 
 ### Reproducibility
 
-- **`analyze.py` computes the route and status distributions.** It never did. The
-  original findings document said "the counts here are what the analyzer prints" while
-  the analyzer did not produce them.
-- **`--rescan` implements the retroactive CVE scan.** The headline count was described as
-  a re-scan of retained records with the current signature set; no such code existed. The
-  analyzer only tallied events the service had already written, so it could never surface
-  traffic that predated a signature. Per-CVE distinct-IP counts and first-seen dates now
-  have a source.
-- **The offline reuse scan matches 12-character prefixes.** `main.py` was fixed for this
-  before the initial release; `analyze.py` was not, and the offline path is the one a
+- **`analyze.py` computes the route and status distributions.** It reported neither
+  before, so a findings document citing them could not point at the tool that produced
+  them.
+- **`--rescan` implements the retroactive CVE scan.** `analyze.py` previously tallied
+  only the `cve_pattern_match` events the service had already written, so it could not
+  surface traffic that predated a signature. Re-applying the current signature set to
+  retained records is now a flag on the published tool rather than an offline step, and
+  per-CVE distinct-IP counts and first-seen dates come with it.
+- **The offline reuse scan matches 12-character prefixes.** `main.py` handled this
+  before the initial release; `analyze.py` did not, and the offline path is the one a
   findings report is generated from.
-- **`--exclude-ip` / `--exclude-ua` replace hand-editing.** "Self-test traffic excluded
-  from every figure" had no implementation.
-- **Third-party addresses print as /24 by default** (`--full-ips` opts out). Nothing
-  truncated anything; the claim was true only because the document contained no
-  addresses.
+- **`--exclude-ip` / `--exclude-ua`** make self-test exclusion a recorded flag rather
+  than an offline step, and the report prints how many records each dropped.
+- **Third-party addresses print as /24 by default** (`--full-ips` opts out), so
+  truncation is a property of the tool rather than of editorial practice.
 - **Signature tables moved to `app/signatures.py`**, imported by both the service and the
   analyzer. They were duplicated and had already drifted: `analyze.py` was missing
   `java:ProcessBuilder` and three route variants including the three pinned parallel
