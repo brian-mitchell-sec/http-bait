@@ -61,6 +61,14 @@ Every item below is a way this instrument produces a number that means less than
 it appears to. None of them are deployment-specific. Keep the ones that apply,
 delete the ones that genuinely do not, add your own.
 
+**Exploit attempts and vulnerability probes are different measurements.** The
+analyzer reports them separately and you should quote them separately. A request
+to `/vendor/phpunit/.../eval-stdin.php` with no body is a scanner checking
+whether PHPUnit is installed; the exploit needs PHP in the request body. Summing
+the two produces the impressive number and the indefensible one. `DETECTORS.md`
+records which signature is which, and the `w/body` column counts probe hits that
+did arrive with a body, which is the subset worth reviewing by hand.
+
 **Live and rescan counts are different measurements.** The live count is what
 the deployed signatures flagged as traffic arrived. The rescan count is what the
 current signature set finds in retained records. If any signature changed during

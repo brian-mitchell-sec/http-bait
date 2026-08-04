@@ -38,7 +38,12 @@ credentials stolen from a third party who has no connection to any of this.
 Recording them would make this service a second breach of the same people.
 
 Both the registered panel handlers and a generic check in the middleware reduce
-a credential submission to its shape:
+a credential submission to its shape. Form-encoded bodies, query strings, JSON at
+any nesting depth, and multipart are parsed structurally; anything else falls
+back to a pattern scan for a credential field name next to a value, which covers
+XML, YAML, and formats nobody anticipated. The bias is toward over-redaction,
+because losing body detail on a false positive costs analytic fidelity while
+missing a real credential means storing someone else's stolen secret:
 
 ```json
 "creds_submitted": {"user_present": true, "user_len": 17, "pass_present": true,
@@ -47,8 +52,15 @@ a credential submission to its shape:
 ```
 
 The generic check runs for every request no handler already marked, so a new
-lure cannot reintroduce the gap by forgetting to opt in. Covered by
-`test_catch_all_post_credentials_are_redacted`.
+lure cannot reintroduce the gap by forgetting to opt in. Query-string credentials
+are redacted in the `query` field itself, which is separate from `body_excerpt`
+and applies on the rate-limited and oversized paths where no body is parsed.
+
+Covered by `test_catch_all_post_credentials_are_redacted` and by
+`test_credentials_never_retained_in_any_shape`, which asserts across ten body and
+query formats. An earlier fix moved redaction into the middleware but left the
+parser handling only flat form-encoded and flat top-level JSON, so nested JSON,
+arrays, XML, multipart and query strings were all still written verbatim.
 
 **Values of credential-bearing headers.** `authorization`, `cookie`,
 `x-api-key`, `x-amz-security-token` and the rest of `SENSITIVE_HEADERS` are
@@ -77,9 +89,20 @@ which is one reason every detection count here is a lower bound.
 
 ## What the analyzer discloses
 
-`analyze.py` prints third-party addresses truncated to /24 (IPv6 to /48) by
-default. `--full-ips` opts out. Two flags disclose your visitor list to a third
-party and are off by default:
+Default output is meant to be safe to paste into a report.
+
+Third-party addresses print truncated to /24, IPv6 to /48, computed with
+`ipaddress.ip_network` rather than string splitting, which produced invalid
+output such as `2001:db8:::/48` on any compressed address. `--full-ips` opts out.
+
+Attacker-supplied text is sanitized before printing. User-Agents, probed paths,
+GraphQL queries and parsed command strings are all third-party-controlled and
+routinely carry credentials, URLs and email addresses belonging to someone other
+than the sender. URLs, addresses, long token-shaped runs and `key=value` secrets
+are stripped, then the text is truncated. `--show-payloads` prints the original
+and is for private analysis only.
+
+Two flags disclose your visitor list to a third party and are off by default:
 
 - `--enrich` sends observed addresses to ip-api.com.
 - `--rdns` resolves each address through whatever resolver chain you are behind.

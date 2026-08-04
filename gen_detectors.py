@@ -42,10 +42,14 @@ both, with the `since` value beside each row.
 """)
 
 print("## CVE and exploit signatures\n")
-print("| id | scope | since |")
-print("|---|---|---|")
-for cve_id, _pattern, where, since in CVE_SIGNATURES:
-    print(f"| `{cve_id}` | {SCOPES.get(where, where)} | {since} |")
+print("`kind` separates payload-bearing attempts from path probes. Reaching")
+print("/vendor/phpunit/.../eval-stdin.php with no body is a scanner checking")
+print("whether PHPUnit is installed; the exploit needs PHP in the request body.")
+print("Report the two counts separately.\n")
+print("| id | kind | scope | since |")
+print("|---|---|---|---|")
+for cve_id, _pattern, where, since, kind in CVE_SIGNATURES:
+    print(f"| `{cve_id}` | **{kind}** | {SCOPES.get(where, where)} | {since} |")
 
 print("\n## Tool-invocation signatures\n")
 print("These parse an already-bounded request. Nothing is evaluated, imported,")

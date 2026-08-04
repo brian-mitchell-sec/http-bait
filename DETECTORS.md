@@ -18,18 +18,23 @@ both, with the `since` value beside each row.
 
 ## CVE and exploit signatures
 
-| id | scope | since |
-|---|---|---|
-| `CVE-2025-55182` | raw body and its percent-decoded form | 2026-07-19 |
-| `CVE-2022-22965` | path, query, body and Content-Type | initial |
-| `CVE-2017-5638` | Content-Type header | initial |
-| `CVE-2018-11776` | path + query | unknown |
-| `CVE-2016-1000027` | path, query, body and Content-Type | initial |
-| `WP-XMLRPC-PINGBACK` | path, query, body and Content-Type | initial |
-| `CVE-2020-25213` | path, query, body and Content-Type | 2026-08-03 |
-| `CVE-2021-44228` | every occurrence of every header | 2026-07-11 |
-| `CVE-2017-9841` | path + query | unknown |
-| `CVE-2024-27956` | path + query | 2026-08-03 |
+`kind` separates payload-bearing attempts from path probes. Reaching
+/vendor/phpunit/.../eval-stdin.php with no body is a scanner checking
+whether PHPUnit is installed; the exploit needs PHP in the request body.
+Report the two counts separately.
+
+| id | kind | scope | since |
+|---|---|---|---|
+| `CVE-2025-55182` | **exploit** | raw body and its percent-decoded form | 2026-07-19 |
+| `CVE-2022-22965` | **exploit** | path, query, body and Content-Type | initial |
+| `CVE-2017-5638` | **exploit** | Content-Type header | initial |
+| `CVE-2018-11776` | **exploit** | path + query | unknown |
+| `CVE-2016-1000027` | **exploit** | path, query, body and Content-Type | initial |
+| `WP-XMLRPC-PINGBACK` | **probe** | path, query, body and Content-Type | initial |
+| `CVE-2020-25213` | **probe** | path, query, body and Content-Type | 2026-08-03 |
+| `CVE-2021-44228` | **exploit** | every occurrence of every header | 2026-07-11 |
+| `CVE-2017-9841` | **probe** | path + query | unknown |
+| `CVE-2024-27956` | **probe** | path + query | 2026-08-03 |
 
 ## Tool-invocation signatures
 

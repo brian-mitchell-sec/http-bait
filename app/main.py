@@ -79,6 +79,12 @@ RECORD_MAX_BYTES = 128 * 1024
 # a field rather than by a timestamp guess.
 WINDOW_LABEL = os.environ.get("HB_WINDOW_LABEL", "unlabelled")
 
+# Advertised in /.well-known/security.txt and the plugin manifest. The default
+# is a documentation domain that reaches nobody, and a honeypot telling people
+# where to report things while pointing at a dead mailbox is worse than staying
+# silent. Set it, or accept that /.well-known/security.txt says so out loud.
+OPERATOR_CONTACT = os.environ.get("HB_OPERATOR_CONTACT", "").strip()
+
 
 def _cap(value: str, limit: int) -> str:
     if len(value) <= limit:
@@ -166,6 +172,11 @@ class JsonlWriter:
     def write(self, record: dict) -> None:
         try:
             record.setdefault("ts", datetime.now(timezone.utc).isoformat())
+            # Stamped here rather than only in alog(), so the invariant holds on
+            # every path into the log including the oversize fallback below.
+            # Derived events used to be unlabelled, which let a report scoped to
+            # one collection window silently keep all of them.
+            record.setdefault("window", WINDOW_LABEL)
             line = json.dumps(record, separators=(",", ":"), ensure_ascii=False)
             if len(line) > RECORD_MAX_BYTES:
                 # Backstop for anything the per-field caps miss (a novel field,
@@ -297,7 +308,14 @@ async def honeytoken(kind: str, session: str, route: str) -> str | dict:
                     "total_evictions": _issued_token_evictions,
                     "cap": ISSUED_TOKEN_MEMORY_CAP})
     catcher_url = f"{CANARY_BASE}/x/{tok}" if kind in CATCHER_EMBEDDED else None
-    await alog({"event": "honeytoken_issued", "kind": kind, "token": tok, "route": route, "session": session})
+    # ip and ua are split out of `session` rather than left packed inside it, so
+    # --exclude-ip / --exclude-ua reach issuance records. An excluded self-test
+    # address previously kept every token it was issued, and a reuse hit could
+    # be built from one of them.
+    issued_ip, _, issued_ua = session.partition("|")
+    await alog({"event": "honeytoken_issued", "kind": kind, "token": tok,
+                "route": route, "session": session,
+                "ip": issued_ip, "ua": _cap(issued_ua, UA_CAP)})
     return FORMATTERS[kind](tok, catcher_url)
 
 
@@ -382,10 +400,6 @@ async def _mint_live_aws_pair() -> dict | None:
     unexpected response shape) — this is best-effort, and must never raise
     into a request handler or block one waiting on a third party."""
     tok = uuid.uuid4().hex[:TOKEN_ID_LEN]
-    # Register the catcher token like any other issuance. Without this, a hit on
-    # this key's own webhook URL landed in /x/{token} as an id the service had
-    # never heard of, indistinguishable from a stranger probing catcher paths.
-    _remember_issued_token(tok)
     payload = {
         "token_type": "aws_keys",
         "memo": f"http-bait honeypot live AWS canary, issued {datetime.now(timezone.utc).isoformat()}",
@@ -401,6 +415,24 @@ async def _mint_live_aws_pair() -> dict | None:
     except Exception as e:
         await alog({"event": "canarytokens_mint_failed", "err": str(e)[:300]})
         return None
+    # Registration happens HERE, after the mint returns, and not before the
+    # request goes out. canarytokens.org validates webhook_url by POSTing to it
+    # at creation time, so a token registered beforehand turns that setup
+    # callback into a honeytoken_triggered event with no visitor anywhere near
+    # it: a confirmed "use" manufactured by our own provisioning.
+    #
+    # A real honeytoken_issued record is emitted alongside, rather than
+    # canarytokens_mint_ok alone, so the catcher token is restored by
+    # rebuild_issued_token_index() after a restart, can be joined to a kind by
+    # the analyzer, and has its eviction logged like any other id.
+    evicted = _remember_issued_token(tok)
+    if evicted is not None:
+        await alog({"event": "issued_token_index_evicted", "token": evicted,
+                    "total_evictions": _issued_token_evictions,
+                    "cap": ISSUED_TOKEN_MEMORY_CAP})
+    await alog({"event": "honeytoken_issued", "kind": "aws_pair_live_catcher",
+                "token": tok, "route": "canarytokens-webhook", "session": "",
+                "ip": "", "ua": ""})
     await alog({"event": "canarytokens_mint_ok", "catcher_token": tok,
                 "canarytoken": data.get("token", ""), "canarytoken_url": data.get("token_url", "")})
     return pair
@@ -620,16 +652,20 @@ async def check_attack_patterns(path: str, query: str, body_text: str, headers: 
         "body": body_text + "\n" + decoded_body,
         "any": " ".join([path, query, body_text, decoded_body, content_type]),
     }
-    for cve_id, pattern, where, since in CVE_SIGNATURES:
+    for cve_id, pattern, where, since, kind in CVE_SIGNATURES:
         # .get() rather than [] so a signature added with a typo'd scope is a
         # dead signature, not a KeyError on every single request.
         if pattern.search(haystacks.get(where, "")):
-            # signature_since goes in the record so a later reader can tell,
-            # from the log alone, whether a row could have been produced live
-            # or only by a rescan with a newer signature set.
+            # signature_since lets a later reader tell, from the log alone,
+            # whether a row could have been produced live or only by a rescan.
+            # signature_kind separates payload-bearing attempts from path
+            # probes, and body_present says whether a probe arrived with
+            # anything that could have been a payload.
             await alog({"event": "cve_pattern_match", "cve_id": cve_id,
-                        "path": path, "matched_in": where, "ip": ip, "ua": ua,
-                        "signature_since": since})
+                        "path": _cap(path, PATH_CAP), "matched_in": where,
+                        "ip": ip, "ua": _cap(ua, UA_CAP),
+                        "signature_since": since, "signature_kind": kind,
+                        "body_present": bool(body_text.strip())})
 
     # A Next/React Server Action header on multipart input is useful even when
     # the rate limiter or body cap prevents us from retaining the payload. It
@@ -637,7 +673,8 @@ async def check_attack_patterns(path: str, query: str, body_text: str, headers: 
     # match above and record whether a body was available for stronger review.
     rsc_header = headers.get("next-action") or headers.get("x-nextjs-server-actions")
     if rsc_header:
-        await alog({"event": "rsc_action_probe", "path": path, "ip": ip, "ua": ua,
+        await alog({"event": "rsc_action_probe", "path": _cap(path, PATH_CAP),
+                    "ip": ip, "ua": _cap(ua, UA_CAP),
                     "action_header": rsc_header[:120],
                     "multipart": "multipart/form-data" in content_type.lower(),
                     "body_available": body_available})
@@ -648,12 +685,14 @@ async def check_attack_patterns(path: str, query: str, body_text: str, headers: 
         if match:
             summary = _safe_command_summary(match.group("command"))
             await alog({"event": "tool_invocation_attempt", "tool": tool,
-                        **summary, "path": path, "ip": ip, "ua": ua})
+                        **summary, "path": _cap(path, PATH_CAP), "ip": ip,
+                        "ua": _cap(ua, UA_CAP)})
     if INDIRECT_COMMAND_RE.search(tool_haystack):
         await alog({"event": "tool_invocation_attempt",
                     "tool": "node:child_process.exec",
                     "command": "<indirect cmd variable>", "command_len": 0,
-                    "command_sha256": "", "path": path, "ip": ip, "ua": ua})
+                    "command_sha256": "", "path": _cap(path, PATH_CAP),
+                    "ip": ip, "ua": _cap(ua, UA_CAP)})
 
 
 def _headers_first_wins(request: Request) -> tuple[dict, list]:
@@ -868,7 +907,7 @@ async def telemetry_mw(request: Request, call_next):
                     "alpn": _cap(hdrs.get("x-tls-alpn", ""), FINGERPRINT_CAP)},
             "method": request.method[:16],
             "path": _cap(request.url.path, PATH_CAP),
-            "query": _cap(str(request.url.query), QUERY_CAP),
+            "query": _cap(redact_query(str(request.url.query)), QUERY_CAP),
             "header_order": [h[0][:64] for h in hdrs_raw[:HEADER_ORDER_CAP]],
             "header_count": len(hdrs_raw),
             "headers": _headers_for_log(hdrs),
@@ -992,36 +1031,125 @@ def _redact_credential_literals(text: str) -> str:
     return _CREDENTIAL_LITERAL_RE.sub(r"\1\2<redacted>", text)
 
 
-def _decode_credential_fields(body: bytes, content_type: str) -> tuple[str, str] | None:
-    """Pull (identity, secret) out of a form-encoded or JSON body, or None.
+# Credential field names, as one alternation, for the fallback scan below.
+_CRED_NAMES_RE = "|".join(re.escape(n) for n in
+                          sorted(CREDENTIAL_FIELD_NAMES, key=len, reverse=True))
+# A credential name adjacent to a non-empty value, in whatever syntax. Covers
+# XML (<password>x</password>), YAML/INI (password: x), unparsed JSON, and any
+# format not handled structurally below.
+_CRED_TEXT_RE = re.compile(
+    r"(?is)(?:<\s*(" + _CRED_NAMES_RE + r")\s*>\s*(?P<xml>[^<\s][^<]*)"
+    r"|\b(" + _CRED_NAMES_RE + r")\b\s*[:=]\s*[\"']?(?P<kv>[^\s\"'&,}\]]+))")
+_MULTIPART_FIELD_RE = re.compile(
+    r'(?is)name="([^"]+)"\r?\n(?:[^\r\n]*\r?\n)*?\r?\n(.*?)(?=\r?\n--|\Z)')
+_MAX_JSON_DEPTH = 6
+_MAX_JSON_ITEMS = 200
+
+
+def _scalar_fields(obj, depth: int = 0):
+    """Every scalar leaf in a nested JSON structure, as (lowercased key, value).
+
+    Recursive because credential submissions are routinely nested. A Rails-style
+    API login is {"user": {"password": ...}}, and a batch login is a list of
+    those. Matching only top-level scalars missed both.
+    """
+    if depth > _MAX_JSON_DEPTH:
+        return
+    if isinstance(obj, dict):
+        for k, v in list(obj.items())[:_MAX_JSON_ITEMS]:
+            if isinstance(v, (str, int, float, bool)):
+                yield str(k).lower(), str(v)
+            else:
+                yield from _scalar_fields(v, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj[:_MAX_JSON_ITEMS]:
+            yield from _scalar_fields(v, depth + 1)
+
+
+def redact_query(query: str) -> str:
+    """Strip credential values from a query string before it is logged.
+
+    Detecting a credential in the query is not enough on its own: `rec["query"]`
+    is its own field, so redacting only `body_excerpt` left `?password=` in the
+    clear. Applied unconditionally at record-build time, so it holds on the
+    rate-limited and oversized paths too, where no body is ever parsed.
+    """
+    if not query or "=" not in query:
+        return query
+    out, changed = [], False
+    for part in query.split("&"):
+        key, sep, value = part.partition("=")
+        if sep and unquote_plus(key).lower() in CREDENTIAL_FIELD_NAMES:
+            out.append(f"{key}=<redacted:len={len(unquote_plus(value))}>")
+            changed = True
+        else:
+            # Substituted in place rather than rebuilt with urlencode, which
+            # would re-encode every other parameter and quietly alter a record
+            # that is the published data format.
+            out.append(part)
+    return "&".join(out) if changed else query
+
+
+def _decode_credential_fields(body: bytes, content_type: str,
+                              query: str = "") -> tuple[str, str] | None:
+    """Pull (identity, secret) out of a request, or None if it carries neither.
 
     Field names come from signatures.CREDENTIAL_FIELD_NAMES /
-    IDENTITY_FIELD_NAMES so the panel handlers and this generic path agree on
-    what counts as a credential.
+    IDENTITY_FIELD_NAMES so the panel handlers and the generic inference path
+    agree on what counts as a credential.
+
+    Structured parsing handles form-encoded bodies, query strings, JSON at any
+    depth, and multipart. Everything else falls back to a pattern scan, because
+    a credential-stuffing tool is under no obligation to send a format this
+    service can parse: an appliance login is SOAP, and `?user=&pass=` in a query
+    string was not being read at all.
+
+    Biased toward over-redaction on purpose. Losing some body detail on a
+    false positive costs a little analytic fidelity; missing a real credential
+    means storing a secret stolen from someone with no connection to any of this.
     """
-    if not body:
-        return None
-    text = body[:BODY_CAP].decode("utf-8", "replace")
+    text = body[:BODY_CAP].decode("utf-8", "replace") if body else ""
     fields: dict[str, str] = {}
-    if "application/json" in content_type:
+
+    def absorb(pairs):
+        for k, v in pairs:
+            fields.setdefault(k, v)
+
+    # Query strings carry credentials on GET login forms and on plenty of
+    # badly-built APIs. Always checked, whatever the method.
+    if query:
         try:
-            data = json.loads(text or "{}")
+            absorb((k.lower(), v[0] if v else "")
+                   for k, v in parse_qs(query, keep_blank_values=True).items())
         except Exception:
-            return None
-        if not isinstance(data, dict):
-            return None
-        fields = {str(k).lower(): str(v) for k, v in data.items()
-                  if isinstance(v, (str, int, float))}
-    else:
-        # parse_qs on a body that is not actually form-encoded yields either
-        # nothing or one junk key, so this is safe to attempt unconditionally.
+            pass
+
+    lowered_ct = content_type.lower()
+    if "json" in lowered_ct:
         try:
-            fields = {k.lower(): (v[0] if v else "")
-                      for k, v in parse_qs(text, keep_blank_values=True).items()}
+            absorb(_scalar_fields(json.loads(text or "{}")))
         except Exception:
-            return None
+            pass          # fall through to the text scan rather than giving up
+    elif "multipart/form-data" in lowered_ct:
+        absorb((m.group(1).lower(), m.group(2).strip())
+               for m in _MULTIPART_FIELD_RE.finditer(text))
+    elif text:
+        try:
+            absorb((k.lower(), v[0] if v else "")
+                   for k, v in parse_qs(text, keep_blank_values=True).items())
+        except Exception:
+            pass
+
     secret = next((fields[k] for k in fields if k in CREDENTIAL_FIELD_NAMES), "")
     identity = next((fields[k] for k in fields if k in IDENTITY_FIELD_NAMES), "")
+
+    if not secret and text:
+        # Nothing structural matched. Look for a credential field name sitting
+        # next to a value in any syntax at all.
+        m = _CRED_TEXT_RE.search(text)
+        if m:
+            secret = (m.group("xml") or m.group("kv") or "").strip()
+
     return (identity, secret) if (identity or secret) else None
 
 
@@ -1043,7 +1171,8 @@ def infer_credential_submission(request: Request, body: bytes) -> None:
     """
     if getattr(request.state, "creds_submitted", None) is not None:
         return
-    found = _decode_credential_fields(body, request.headers.get("content-type", ""))
+    found = _decode_credential_fields(body, request.headers.get("content-type", ""),
+                                      str(request.url.query))
     if not found or not found[1]:   # an identity with no secret is not a submission
         return
     mark_credential_submission(request, *found, source="body-inferred")
@@ -1058,7 +1187,8 @@ def mark_panel_credentials(request: Request) -> None:
     which field names counted.
     """
     user, pw = _decode_credential_fields(
-        request.state.body, request.headers.get("content-type", "")) or ("", "")
+        request.state.body, request.headers.get("content-type", ""),
+        str(request.url.query)) or ("", "")
     mark_credential_submission(request, user, pw)
 
 
@@ -1162,7 +1292,7 @@ async def ai_plugin_lure(request: Request):
         "auth": {"type": "none"},
         "api": {"type": "openapi", "url": f"{CANARY_BASE}/openapi.json"},
         "logo_url": f"{CANARY_BASE}/favicon.ico",
-        "contact_email": "ops@http-bait.example",
+        "contact_email": OPERATOR_CONTACT or "unconfigured@invalid",
         "legal_info_url": f"{CANARY_BASE}/terms",
     })
 
@@ -1613,10 +1743,15 @@ async def security_txt(request: Request):
     # per-visit alias would add no signal without mail infra behind it to
     # receive and correlate against.
     mark(request, "admin")
+    if OPERATOR_CONTACT:
+        contact = f"Contact: mailto:{OPERATOR_CONTACT}\n"
+    else:
+        contact = ("# No operator contact configured for this deployment.\n"
+                   "# Set HB_OPERATOR_CONTACT before relying on this file.\n")
     body = (
-        "Contact: mailto:security@http-bait.example\n"
-        "Expires: 2027-01-01T00:00:00.000Z\n"
-        "Preferred-Languages: en\n"
+        contact
+        + "Expires: 2027-01-01T00:00:00.000Z\n"
+          "Preferred-Languages: en\n"
     )
     return PlainTextResponse(body, media_type="text/plain")
 

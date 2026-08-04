@@ -97,6 +97,22 @@ def root_variant_at(ts: datetime) -> str:
 # Scopes: "path" (path + "?" + query), "content-type", "headers" (every
 # occurrence of every header), "body" (raw + percent-decoded), "any" (union of
 # path, query, body, content-type).
+#
+# Each entry also declares a KIND:
+#
+#   "exploit" — the pattern matches attacker-supplied payload. A hit is an
+#               attempt to exploit, not merely to look.
+#   "probe"   — the pattern matches a path or a generic marker and nothing more.
+#               Reaching the endpoint is reconnaissance. CVE-2017-9841 needs PHP
+#               in the request body to do anything, and CVE-2024-27956 needs its
+#               SQL payload; a bare GET to either path is a scanner checking
+#               whether the software is installed.
+#
+# The distinction exists because collapsing the two inflates the number everyone
+# quotes. A report saying "N exploit attempts" where N counts path probes is
+# describing scanner inventory as attack. analyze.py tallies them separately and
+# records `body_present` on probe hits, so a probe that did arrive with a body
+# can be promoted deliberately rather than by accident.
 # --------------------------------------------------------------------------- #
 CVE_SIGNATURES = [
     # React Server Components unsafe deserialization ("React2Shell"). The
@@ -104,49 +120,49 @@ CVE_SIGNATURES = [
     # header and this promise/prototype chain in the body.
     # React tracks the upstream flaw as CVE-2025-55182; affected frameworks
     # such as Next.js received their own downstream advisories.
-    ("CVE-2025-55182", re.compile(r"\$1:__proto__:then", re.I), "body", "2026-07-19"),
+    ("CVE-2025-55182", re.compile(r"\$1:__proto__:then", re.I), "body", "2026-07-19", "exploit"),
     # Spring4Shell / class-loader manipulation.
-    ("CVE-2022-22965", re.compile(r"class\.module\.classLoader", re.I), "any", "initial"),
+    ("CVE-2022-22965", re.compile(r"class\.module\.classLoader", re.I), "any", "initial", "exploit"),
     # Struts2 OGNL RCE via Content-Type (S2-045/S2-046 family).
-    ("CVE-2017-5638", re.compile(r"%\{.*(ognl|runtime|processbuilder)", re.I), "content-type", "initial"),
+    ("CVE-2017-5638", re.compile(r"%\{.*(ognl|runtime|processbuilder)", re.I), "content-type", "initial", "exploit"),
     # S2-057 payloads put the action prefix BEFORE the OGNL expression
     # (`redirect:${233*233}`, `redirectAction:${...}`), and the RCE variant
     # spells it `ognl.OgnlContext` with a dot, not `ognl:`. The previous
     # pattern required `${` first and a trailing colon, so it matched none of
     # the shapes actually seen in the wild — a detector that could never fire.
-    ("CVE-2018-11776", re.compile(r"(redirect(action)?:|@?ognl[.:])", re.I), "path", "unknown"),
+    ("CVE-2018-11776", re.compile(r"(redirect(action)?:|@?ognl[.:])", re.I), "path", "unknown", "exploit"),
     # Spring Framework HttpInvoker deserialization. The advertised Spring Boot
     # banner is what draws these; the probe itself targets the remoting
     # endpoint rather than the actuator write-env chain. (The comment on this
     # entry previously described the actuator write-env chain, which is a
     # different flaw; the pattern was always the HttpInvoker one, so only the
     # description was wrong.)
-    ("CVE-2016-1000027", re.compile(r"org\.springframework\.remoting\.httpinvoker", re.I), "any", "initial"),
+    ("CVE-2016-1000027", re.compile(r"org\.springframework\.remoting\.httpinvoker", re.I), "any", "initial", "exploit"),
     # WordPress xmlrpc pingback/multicall abuse. NOT a CVE: this is documented
     # protocol behaviour being abused, and it was previously mislabelled
     # CVE-2020-25213 (which is the wp-file-manager RCE, an unrelated flaw with
     # an unrelated payload). The pattern is unchanged, so historical counts
     # carry over; only the id it reports under is corrected.
-    ("WP-XMLRPC-PINGBACK", re.compile(r"wp_ajax|multicall|pingback\.ping", re.I), "any", "initial"),
+    ("WP-XMLRPC-PINGBACK", re.compile(r"wp_ajax|multicall|pingback\.ping", re.I), "any", "initial", "probe"),
     # wp-file-manager unauthenticated upload/RCE (connector endpoint probe) —
     # the flaw CVE-2020-25213 actually refers to.
-    ("CVE-2020-25213", re.compile(r"wp-file-manager|filemanager/lib/php/connector", re.I), "any", "2026-08-03"),
+    ("CVE-2020-25213", re.compile(r"wp-file-manager|filemanager/lib/php/connector", re.I), "any", "2026-08-03", "probe"),
     # Log4Shell: sprayed into ANY header (User-Agent, X-Api-Version, Referer, …)
     # by real-world scanners regardless of advertised stack, so it is not gated
     # to a variant banner the way the others are. Originally scoped to
     # path/query/body only, which missed the header-sprayed shape that is how
     # this actually arrives; rescoped to headers 2026-07-11.
-    ("CVE-2021-44228", re.compile(r"\$\{jndi:", re.I), "headers", "2026-07-11"),
+    ("CVE-2021-44228", re.compile(r"\$\{jndi:", re.I), "headers", "2026-07-11", "exploit"),
     # PHPUnit eval-stdin.php RCE — the path alone is the exploit. A generic,
     # stack-agnostic probe like Log4Shell, commonly seen riding along in
     # round-robin scan bursts. Added after the first release; the exact date is
     # not recoverable from this repository.
-    ("CVE-2017-9841", re.compile(r"phpunit.*eval-stdin\.php", re.I), "path", "unknown"),
+    ("CVE-2017-9841", re.compile(r"phpunit.*eval-stdin\.php", re.I), "path", "unknown", "probe"),
     # WP-Automatic auth-bypass SQLi. The probe is a request to the plugin's CSV
     # handler; the injected SQL rides in the query string. Path-scoped for the
     # same reason as PHPUnit above: reaching this endpoint at all is the
     # attempt.
-    ("CVE-2024-27956", re.compile(r"wp-automatic/inc/csv\.php", re.I), "path", "2026-08-03"),
+    ("CVE-2024-27956", re.compile(r"wp-automatic/inc/csv\.php", re.I), "path", "2026-08-03", "probe"),
 ]
 
 # Log attempted command/tool invocations as their own derived signal. These
