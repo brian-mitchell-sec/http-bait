@@ -32,7 +32,14 @@ a failure class this project claims to hunt, which is exactly why they matter.
   over-serves), the retry floor bounds outbound mint attempts to one per
   window under an outage, an exhausted cache is not served after a failed
   remint, a merely time-stale cache keeps serving, and a mint exception
-  degrades to the synthetic formatter instead of a 500.
+  degrades to the synthetic formatter instead of a 500. Writing those tests
+  surfaced a real defect, caught by CI rather than locally:
+  `_live_aws_last_attempt_at` initialized to `0.0` measured against
+  `time.monotonic()`, so on a host with uptime under the retry floor the very
+  first mint attempt was judged "inside the cooldown window" and no live pair
+  was ever minted — the service looked healthy and silently served only
+  synthetic keys. It now initializes to `-CANARYTOKENS_RETRY_COOLDOWN_SECS`,
+  and a test pins the fresh-boot behaviour.
 - `analyze.py`'s `TOKEN_PREFIX_LEN` fallback narrowed to `ImportError` and made
   loud; a broad `except` silently reverted the scan width on any breakage in
   `formatters.py`, the constant-goes-stale bug the import exists to prevent.

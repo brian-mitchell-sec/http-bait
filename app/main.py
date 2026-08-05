@@ -390,7 +390,11 @@ _live_aws_lock = asyncio.Lock()
 _live_aws_cache: dict | None = None
 _live_aws_minted_at: float = 0.0                    # time.monotonic(), internal freshness math only
 _live_aws_minted_generation: str | None = None       # wall-clock ISO ts, the one that goes in logs
-_live_aws_last_attempt_at: float = 0.0
+# Initialized so the very first mint attempt is always allowed: with 0.0
+# measured against time.monotonic(), a host booted less than
+# CANARYTOKENS_RETRY_COOLDOWN_SECS ago could never mint at all (found by CI,
+# whose runner's uptime was under the floor).
+_live_aws_last_attempt_at: float = -CANARYTOKENS_RETRY_COOLDOWN_SECS
 _live_aws_servings: int = 0
 
 

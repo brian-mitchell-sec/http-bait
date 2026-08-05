@@ -790,8 +790,35 @@ def _reset_live_aws(main):
     main._live_aws_cache = None
     main._live_aws_minted_at = 0.0
     main._live_aws_minted_generation = None
-    main._live_aws_last_attempt_at = 0.0
+    main._live_aws_last_attempt_at = -main.CANARYTOKENS_RETRY_COOLDOWN_SECS
     main._live_aws_servings = 0
+
+
+def test_canary_first_mint_allowed_on_a_freshly_booted_host(monkeypatch):
+    """_live_aws_last_attempt_at initialized to 0.0 measured against
+    time.monotonic(): on a host with uptime under the retry floor the first
+    attempt was 'inside the cooldown window' and no mint ever happened — the
+    service looked healthy and never served a live pair. CI caught this; its
+    runner's uptime was under 300s."""
+    import asyncio
+    import main
+    _reset_live_aws(main)
+    monkeypatch.setattr(main, "CANARYTOKENS_LIVE", True)
+    monkeypatch.setattr(main, "_live_aws_last_attempt_at", 0.0)  # pre-fix value
+    monkeypatch.setattr(main.time, "monotonic", lambda: 42.0)    # uptime < floor
+    calls = []
+
+    async def fake_mint():
+        calls.append(1)
+        return {"aws_access_key_id": "AKIAFRESHBOOT1", "aws_secret_access_key": "x"}
+
+    monkeypatch.setattr(main, "_mint_live_aws_pair", fake_mint)
+    assert asyncio.run(main.get_live_aws_pair()) is None, \
+        "pre-fix initial state must reproduce the no-mint bug"
+
+    _reset_live_aws(main)
+    assert asyncio.run(main.get_live_aws_pair()) is not None and len(calls) == 1
+    print("  fresh-boot host: pre-fix state never mints, fixed state mints at once")
 
 
 def test_canary_servings_cap_is_a_hard_bound(monkeypatch):
