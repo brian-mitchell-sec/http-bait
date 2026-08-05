@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.1 — 2026-08-04
+## v0.1.1, 2026-08-04
 
 Fixes for defects found in review after v0.1.0 was tagged. **v0.1.0 ships a
 credential-retention defect and should not be deployed or cited.**
@@ -31,7 +31,7 @@ credential-retention defect and should not be deployed or cited.**
 
 Tests 33 to 55.
 
-## v0.1.0 — 2026-08-03
+## v0.1.0, 2026-08-03
 
 First tagged release. Everything below landed in one pass after a review of the initial
 public drop. Several items change what the tooling reports, so any figure produced by an
@@ -82,8 +82,8 @@ report" section with the commands and the rules about what may be claimed.
   its own webhook URL is attributable instead of looking like a stranger's probe.
 - **Token scan width is derived, not hardcoded.** `formatters.SERVED_TOKEN_LEN` declares
   what each kind serves; the detector scans at the minimum, and a test checks every
-  declaration against real output. The original bug — matching only the full 16-character
-  id while two kinds serve 12, blinding the detector to ~14% of issuances — was possible
+  declaration against real output. The original bug, matching only the full 16-character
+  id while two kinds serve 12, blinding the detector to ~14% of issuances, was possible
   because nothing enforced the assumption.
 - **An oversized body retains its leading 64KB** instead of discarding everything. A
   single 64,001-byte chunk previously retained zero bytes, and Caddy proxies with

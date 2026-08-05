@@ -32,6 +32,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt pytest
 
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check .
+
       - name: Tests
         env:
           HB_LOG_DIR: ${{ runner.temp }}/hb-logs
@@ -47,7 +52,7 @@ jobs:
 
       - name: DETECTORS.md is current
         run: |
-          python gen_detectors.py > /tmp/detectors.md
+          python gen_detectors.py --stdout > /tmp/detectors.md
           diff -u DETECTORS.md /tmp/detectors.md
 
       - name: Analyzer runs with no app/ dependencies installed

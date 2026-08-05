@@ -21,7 +21,7 @@ Fill this in from your own logs. If you have not deployed yet, leave it as is.
 
 An agent working in this repository: see AGENTS.md, "Producing a findings
 report", for the exact commands and the rules about what may and may not be
-claimed. Do not populate this file from fixtures/ — those are synthetic and
+claimed. Do not populate this file from fixtures/, those are synthetic and
 exist to test the analyzer, not to describe anything real.
 -->
 
@@ -50,7 +50,7 @@ without one cannot be compared against anything, including your own later runs.
      from, or the two will drift and only one of them will be checkable. -->
 
 ```
-$ python analyze.py data/logs/http_events.jsonl --rescan --window <label>
+$ python3 analyze.py 'data/logs/http_events*.jsonl' --rescan --window <label>
 
 <paste output here>
 ```
@@ -148,7 +148,8 @@ report on the pre-publication label only.
 ## Reproducing
 
 ```bash
-python analyze.py <your log> --rescan --window <label> --exclude-ip <self-test ip>
+python3 analyze.py 'data/logs/http_events*.jsonl' --rescan --window <label>
+--exclude-ip <self-test ip>
 ```
 
 Do not publish raw logs. They contain third-party addresses, and an address
@@ -159,6 +160,6 @@ To show the tooling behaves as described without exposing your data, point
 readers at the synthetic fixture instead:
 
 ```bash
-python analyze.py fixtures/sample_events.jsonl --rescan
-diff <(python analyze.py fixtures/sample_events.jsonl --rescan) fixtures/expected_analysis.txt
+python3 analyze.py fixtures/sample_events.jsonl --rescan
+diff <(python3 analyze.py fixtures/sample_events.jsonl --rescan) fixtures/expected_analysis.txt
 ```

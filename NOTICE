@@ -25,9 +25,22 @@ FoxIO terms apply to you. Running this honeypot as personal or academic research
 is within them. Building a commercial product on the fingerprints it collects is
 not, absent a licence.
 
-To avoid the dependency entirely, remove the two `--with` lines from
-caddy/Dockerfile and use a stock Caddy image. The service degrades gracefully:
-`ja4` and `ja4h` are recorded as empty strings and nothing else changes.
+To avoid the dependency entirely, use the fingerprint-free stack:
+
+    docker compose -f docker-compose.nofingerprint.yml up -d --build
+
+That pairs a stock caddy:2.8-alpine image with Caddyfile.nofingerprint. The app
+degrades cleanly: `ja4` and `ja4h` are recorded as empty strings and every other
+field is unchanged. analyze.py never reads those two fields, so no part of the
+shipped report is affected.
+
+Removing the two `--with` lines from caddy/Dockerfile is NOT sufficient on its
+own. The default Caddyfile also uses the ja4 listener wrapper and the ja4 and
+ja4h_header directives, and a stock Caddy refuses to parse them:
+
+    Error: getting module named 'caddy.listeners.ja4': module not registered
+
+Caddy then exits and nothing is served. Use the two files above instead.
 
 --------------------------------------------------------------------------------
 Python dependencies (app/requirements.txt) are installed at build time and are

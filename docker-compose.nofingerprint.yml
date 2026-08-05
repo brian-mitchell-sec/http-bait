@@ -1,5 +1,16 @@
-# Standalone stack for the http-bait honeypot: own containers, own network,
-# own volumes, nothing shared with anything else you run.
+# Same stack as docker-compose.yml, using a stock Caddy image and
+# Caddyfile.nofingerprint instead of building JA4+ fingerprinting from source.
+#
+# For operators who cannot accept the FoxIO License 1.1 commercial-use
+# restriction on JA4+ (see NOTICE). Also considerably faster to deploy: the
+# default stack compiles Caddy on the target host, which pulls golang:1.25 and
+# needs roughly 2GB of RAM and disk to complete.
+#
+# The app degrades cleanly: `ja4` and `ja4h` are recorded as empty strings.
+# analyze.py never reads those fields, so the shipped report is unaffected.
+#
+# Standalone: own containers, own network, own volumes, nothing shared with
+# anything else you run.
 #
 # Binds host 80/443 directly, so it cannot share a host with another service
 # already holding those ports. Either give it its own box (the default, and
@@ -7,13 +18,13 @@
 # config and don't run this stack's caddy service.
 services:
   caddy:
-    build: ./caddy
+    image: caddy:2.8-alpine
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile.nofingerprint:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
       - caddy_logs:/var/log/caddy
@@ -31,20 +42,15 @@ services:
     environment:
       - HB_LOG_DIR=/data/logs
       - HB_CANARY_BASE=https://http-bait.example.com
-      # Published in /.well-known/security.txt. Set this before you point the
-      # service at the internet: a honeypot that tells people where to report
-      # things while naming nobody is worse than staying silent.
-      # - HB_OPERATOR_CONTACT=security@example.com
-      #
-      # Tags every record with the collection window it belongs to. Change it
-      # whenever the population you are collecting from changes, and above all
-      # before publishing anything about this deployment: readers arriving from
-      # a writeup are not the organic scanner traffic the earlier records
-      # sampled, and mixing the two silently invalidates every rate.
+      # Tags every record with the collection window it belongs to. Change this
+      # whenever the population you are collecting from changes, most
+      # importantly before publishing anything about this deployment, since
+      # readers arriving from a writeup are not the organic scanner traffic the
+      # earlier records sampled, and mixing the two silently invalidates rates.
       - HB_WINDOW_LABEL=w1
       # Opt-in: mints a REAL, functioning AWS canary key via canarytokens.org
       # (see main.py's "Live canarytokens.org integration" section) instead of
-      # a purely synthetic aws_pair. Off by default; uncomment to enable. This
+      # a purely synthetic aws_pair. Off by default, uncomment to enable; this
       # is the one outbound call this service makes to a third party.
       # - HB_CANARYTOKENS_LIVE=1
       # - HB_CANARYTOKENS_REFRESH_SECS=86400

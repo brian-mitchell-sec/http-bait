@@ -1,13 +1,16 @@
-# Standalone Caddy for the http-bait honeypot: JA4/JA4H fingerprinting (see
-# caddy/Dockerfile for the build) in its own container with its own config.
+# Caddyfile WITHOUT JA4+ fingerprinting, for operators who cannot accept the
+# FoxIO License 1.1 commercial-use restriction (see NOTICE).
+#
+# Use this with a stock `caddy:2.8-alpine` image instead of building
+# caddy/Dockerfile. The app degrades cleanly: `ja4` and `ja4h` are recorded as
+# empty strings and every other field is unchanged. analyze.py never reads those
+# two fields, so no part of the shipped report is affected.
+#
+#   docker compose -f docker-compose.nofingerprint.yml up -d --build
 # It must not share a network namespace or a site block with anything else you
 # run (SPEC §2 isolation requirement).
 {
 	servers {
-		listener_wrappers {
-			ja4
-			tls
-		}
 		# Bound slow-body ("slowloris"-style) connections at the edge, the
 		# app's own body-read cap (main.py's _read_capped_body) bounds bytes
 		# but not time, so a trickling upload could otherwise hold a
@@ -19,8 +22,6 @@
 			read_header 10s
 		}
 	}
-	order ja4 first
-	order ja4h_header after ja4
 }
 
 # Placeholder hostname, rewritten to the real registered domain by deploy.sh
@@ -28,11 +29,6 @@
 # ties the bait surface to you, and SPEC §2 asks for a name with no association
 # to anything else you operate.
 http-bait.example.com {
-	ja4 {
-		request_header X-JA4
-		var_name ja4
-	}
-	ja4h_header
 	encode gzip
 	header {
 		X-Content-Type-Options "nosniff"

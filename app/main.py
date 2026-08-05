@@ -1,5 +1,5 @@
 """
-http-bait — a plain-HTTP honeypot targeting mass internet scanners (leaked-secret
+http-bait, a plain-HTTP honeypot targeting mass internet scanners (leaked-secret
 hunters, admin-panel brute-forcers, CVE scanners). See SPEC.md for the full
 design and README.md for what it is and how to run it.
 
@@ -25,7 +25,7 @@ import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from urllib.parse import parse_qs, unquote_plus
 
@@ -40,14 +40,12 @@ from signatures import (
     CVE_SIGNATURES,
     IDENTITY_FIELD_NAMES,
     INDIRECT_COMMAND_RE,
-    ROOT_ROTATION_PERIOD_DAYS,
-    ROOT_VARIANT_CYCLE,
     ROUTE_VARIANT,
     SENSITIVE_HEADERS,
     TOKEN_ID_LEN,
     TOOL_INVOCATION_SIGNATURES,
     VARIANTS,
-    root_variant_at,
+    root_variant_at
 )
 
 LOG_DIR = Path(os.environ.get("HB_LOG_DIR", "/data/logs"))
@@ -94,7 +92,7 @@ def _cap(value: str, limit: int) -> str:
 # HB_LOG_KEEP_ROTATED rotated files and deleting older ones. Rotation alone
 # caps the LIVE file but not total disk: on a small droplet absorbing scanner
 # traffic for weeks, undeleted rotations fill the disk, and a full disk makes
-# write() fail silently while the service still answers 200s — i.e. the
+# write() fail silently while the service still answers 200s, i.e. the
 # honeypot looks healthy and records nothing. Set HB_LOG_KEEP_ROTATED=0 to
 # retain everything (only safe if something else prunes or ships the files).
 LOG_MAX_BYTES = int(os.environ.get("HB_LOG_MAX_BYTES", 200 * 1024 * 1024))
@@ -129,7 +127,7 @@ app = FastAPI(title="portal", docs_url=None, redoc_url=None, openapi_url=None,
 # --------------------------------------------------------------------------- #
 # JSONL writer. write() never raises (best-effort telemetry, not the
 # product) and rotates the live file at LOG_MAX_BYTES. awrite() is the path
-# every async call site should use — it offloads the actual fsync'd write to
+# every async call site should use, it offloads the actual fsync'd write to
 # a worker thread via asyncio.to_thread so a slow/full disk never blocks the
 # event loop that's also serving every other in-flight request (found in
 # review: the sync-only version blocked on fsync directly from async route
@@ -140,7 +138,7 @@ class JsonlWriter:
         self.path = path
         self._lock = threading.Lock()
         # Health signal. A write failure (most plausibly a full disk) is not
-        # fatal to serving, so it must not raise — but it must be visible, or
+        # fatal to serving, so it must not raise, but it must be visible, or
         # the service goes on answering 200s while recording nothing. /healthz
         # reads these.
         self.last_write_error: str | None = None
@@ -163,7 +161,7 @@ class JsonlWriter:
         # Must be called with self._lock held.
         try:
             if self.path.exists() and self.path.stat().st_size >= LOG_MAX_BYTES:
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
                 self.path.rename(self.path.with_name(f"{self.path.stem}.{stamp}{self.path.suffix}"))
                 self._prune_rotated()
         except OSError as e:
@@ -171,7 +169,7 @@ class JsonlWriter:
 
     def write(self, record: dict) -> None:
         try:
-            record.setdefault("ts", datetime.now(timezone.utc).isoformat())
+            record.setdefault("ts", datetime.now(UTC).isoformat())
             # Stamped here rather than only in alog(), so the invariant holds on
             # every path into the log including the oversize fallback below.
             # Derived events used to be unlabelled, which let a report scoped to
@@ -210,7 +208,7 @@ class JsonlWriter:
         # line below, but the write runs on a worker thread that may start much
         # later under load: without this the timestamp records when the thread
         # got around to it rather than when the event happened.
-        record.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        record.setdefault("ts", datetime.now(UTC).isoformat())
         try:
             await asyncio.to_thread(self.write, record)
         except Exception as e:
@@ -278,7 +276,7 @@ def rebuild_issued_token_index() -> int:
         if not path.exists():
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     if '"honeytoken_issued"' not in line:
                         continue
@@ -322,19 +320,19 @@ async def honeytoken(kind: str, session: str, route: str) -> str | dict:
 # --------------------------------------------------------------------------- #
 # Live canarytokens.org integration (opt-in). SPEC §5's known limitation for a
 # bare (non-catcher-embedded) kind like aws_pair is that "use" is only provable
-# via the real provider's own leaked-credential detection, which we can't see —
-# our synthetic key can never actually be validated against a real AWS API.
+# via the real provider's own leaked-credential detection, which we can't see,
+# # our synthetic key can never actually be validated against a real AWS API.
 # canarytokens.org mints REAL, functioning AWS access keys against their own
 # monitored AWS account; a call made with one anywhere (not just against us)
 # fires their alert to a webhook we control. Off by default
-# (HB_CANARYTOKENS_LIVE=1 to enable) — this is the one place this service makes
+# (HB_CANARYTOKENS_LIVE=1 to enable), this is the one place this service makes
 # an outbound call to a third party, so it stays opt-in rather than live-default.
 #
 # Endpoint confirmed against thinkst/canarytokens' own frontend/app.py
 # (POST /generate, token_type="aws_keys"): unauthenticated, no captcha (the
 # turnstile check in that handler is gated to token_type=="credit_card_v2"
 # only), memo required, webhook_url validated by the service POSTing to it
-# once at creation time — which our own /x/{token} catcher already satisfies
+# once at creation time, which our own /x/{token} catcher already satisfies
 # (any request there returns 200), so no new route is needed.
 #
 # Never blocks a request: minting happens at most once per refresh window, and
@@ -343,14 +341,14 @@ async def honeytoken(kind: str, session: str, route: str) -> str | dict:
 CANARYTOKENS_LIVE = os.environ.get("HB_CANARYTOKENS_LIVE") == "1"
 CANARYTOKENS_REFRESH_SECS = int(os.environ.get("HB_CANARYTOKENS_REFRESH_SECS", 24 * 3600))
 CANARYTOKENS_MINT_TIMEOUT_SECS = 8.0
-# Floor between mint ATTEMPTS, UNCONDITIONAL — applies whether the last
+# Floor between mint ATTEMPTS, UNCONDITIONAL, applies whether the last
 # attempt failed (outage backoff) OR succeeded (routine servings/refresh
 # staleness). Without this, a canarytokens.org outage/slowdown means every
 # single request hitting an aws_pair-serving route while the cache is empty
 # re-attempts its own real outbound call; separately, an attacker who stays
 # within this service's own per-IP rate limit but repeatedly exhausts the
 # GLOBAL servings cap could otherwise force a real mint call roughly once
-# per mint round-trip, sustained — a genuine (if non-amplifying) DoS vector
+# per mint round-trip, sustained, a genuine (if non-amplifying) DoS vector
 # against canarytokens.org itself, found in ethics/safety review, that SPEC
 # §2's "not a DoS amplifier" guardrail didn't previously bound. Default
 # bounds worst-case real mint volume to ~12/hour regardless of attack
@@ -366,7 +364,7 @@ CANARYTOKENS_RETRY_COOLDOWN_SECS = float(os.environ.get("HB_CANARYTOKENS_RETRY_C
 # Cap the number of distinct servings of ONE live key, alongside the time cap
 # (whichever is hit first forces a re-mint). Found in adversarial review: a
 # flat 24h time cap alone means a real-world trigger could implicate ANY of
-# the potentially dozens of visitors served that same pair during the day —
+# the potentially dozens of visitors served that same pair during the day, #
 # capping by serving count too bounds that anonymity set directly, which is
 # the variable that actually determines how many suspects there are, rather
 # than relying solely on elapsed time.
@@ -383,8 +381,8 @@ CANARYTOKENS_MAX_SERVINGS = min(
 
 _live_aws_lock = asyncio.Lock()
 _live_aws_cache: dict | None = None
-_live_aws_minted_at: float = 0.0                    # time.monotonic() — internal freshness math only
-_live_aws_minted_generation: str | None = None       # wall-clock ISO ts — the one that goes in logs
+_live_aws_minted_at: float = 0.0                    # time.monotonic(), internal freshness math only
+_live_aws_minted_generation: str | None = None       # wall-clock ISO ts, the one that goes in logs
 _live_aws_last_attempt_at: float = 0.0
 _live_aws_servings: int = 0
 
@@ -397,12 +395,12 @@ def _live_aws_fresh(now: float) -> bool:
 
 async def _mint_live_aws_pair() -> dict | None:
     """One-shot mint call. Returns None on ANY failure (network, non-2xx,
-    unexpected response shape) — this is best-effort, and must never raise
+    unexpected response shape), this is best-effort, and must never raise
     into a request handler or block one waiting on a third party."""
     tok = uuid.uuid4().hex[:TOKEN_ID_LEN]
     payload = {
         "token_type": "aws_keys",
-        "memo": f"http-bait honeypot live AWS canary, issued {datetime.now(timezone.utc).isoformat()}",
+        "memo": f"http-bait honeypot live AWS canary, issued {datetime.now(UTC).isoformat()}",
         "webhook_url": f"{CANARY_BASE}/x/{tok}",
     }
     try:
@@ -444,11 +442,10 @@ def _live_aws_servings_exhausted() -> bool:
 
 async def get_live_aws_pair() -> dict | None:
     """Cached accessor: mints at most once per CANARYTOKENS_REFRESH_SECS OR
-    after CANARYTOKENS_MAX_SERVINGS distinct calls, whichever comes first —
-    serves a stale-but-still-real cached pair otherwise. Minting a fresh live
+    after CANARYTOKENS_MAX_SERVINGS distinct calls, whichever comes first, serves a stale-but-still-real cached pair otherwise. Minting a fresh live
     AWS key on every single honeypot hit would be both wasteful and needlessly
     noisy against a third-party service for no additional signal; the servings
-    cap exists to bound the OTHER cost of sharing one key — and unlike the
+    cap exists to bound the OTHER cost of sharing one key, and unlike the
     time cap, it's a bound on how many visitors could plausibly be
     responsible for a later real-world trigger, which is NOT allowed to
     degrade gracefully under a remint failure the way freshness can (see the
@@ -468,16 +465,16 @@ async def get_live_aws_pair() -> dict | None:
         if _live_aws_fresh(now):
             _live_aws_servings += 1
             return _live_aws_cache
-        # Unconditional floor between ATTEMPTS — see CANARYTOKENS_RETRY_COOLDOWN_SECS's
+        # Unconditional floor between ATTEMPTS, see CANARYTOKENS_RETRY_COOLDOWN_SECS's
         # comment for why this now applies to routine (non-failure) remints too.
         if now - _live_aws_last_attempt_at < CANARYTOKENS_RETRY_COOLDOWN_SECS:
             # A servings-EXHAUSTED cache must not keep being served just
-            # because a remint isn't allowed yet — that would let the
+            # because a remint isn't allowed yet, that would let the
             # anonymity set the cap exists to bound grow unboundedly for the
             # full duration of the floor, repeatedly (found in adversarial
             # review: the fallback-serve path below had no ceiling check of
             # its own). Merely TIME-stale (still under the servings budget)
-            # is fine to keep serving — that's a freshness concern, not a
+            # is fine to keep serving, that's a freshness concern, not a
             # per-key exposure bound, and degrading it to "serve nothing"
             # while merely waiting out the floor would be worse.
             if _live_aws_servings_exhausted():
@@ -487,7 +484,7 @@ async def get_live_aws_pair() -> dict | None:
             return _live_aws_cache
         _live_aws_last_attempt_at = now
         # _mint_live_aws_pair() already catches everything internally and
-        # returns None rather than raising — but this accessor must never
+        # returns None rather than raising, but this accessor must never
         # depend on that as its ONLY line of defense (a future refactor of
         # that function, or of whatever it delegates to, could reintroduce
         # a raise). A live-canary mint failure must never turn into a 500
@@ -500,7 +497,7 @@ async def get_live_aws_pair() -> dict | None:
         if pair is not None:
             _live_aws_cache = pair
             _live_aws_minted_at = now
-            _live_aws_minted_generation = datetime.now(timezone.utc).isoformat()
+            _live_aws_minted_generation = datetime.now(UTC).isoformat()
             _live_aws_servings = 1  # this call is itself the first serving of the new pair
         elif _live_aws_servings_exhausted():
             # Same hard-bound rule as the cooldown branch above: an exhausted
@@ -509,7 +506,7 @@ async def get_live_aws_pair() -> dict | None:
             return None
         elif _live_aws_cache is not None:
             # Mint failed, but the cache is only time-stale, not
-            # servings-exhausted — still serving it as a last resort.
+            # servings-exhausted, still serving it as a last resort.
             _live_aws_servings += 1
         return _live_aws_cache  # fresh mint, last-good stale (not exhausted) cache, or None
 
@@ -528,7 +525,7 @@ async def aws_pair_honeytoken(session: str, route: str) -> dict:
         # was, and which mint generation it belongs to, makes that
         # reconstruction direct instead of inferred. mint_generation is wall
         # -clock (found in review: an earlier version logged
-        # _live_aws_minted_at directly, which is time.monotonic()-based —
+        # _live_aws_minted_at directly, which is time.monotonic()-based, #
         # process-relative and NOT joinable against canarytokens_mint_ok's
         # or this event's own wall-clock ts, defeating the whole point).
         await alog({"event": "honeytoken_issued", "kind": "aws_pair_live", "route": route, "session": session,
@@ -539,7 +536,7 @@ async def aws_pair_honeytoken(session: str, route: str) -> dict:
 
 # --------------------------------------------------------------------------- #
 # Per-IP rate limiting (SPEC §2 non-goal: not a DoS amplifier). Sliding-window
-# token bucket in memory — this is a single-worker, single-process service
+# token bucket in memory, this is a single-worker, single-process service
 # (see Dockerfile), so no cross-process coordination is needed.
 # --------------------------------------------------------------------------- #
 RATE_WINDOW_S = 10.0
@@ -576,7 +573,7 @@ def _rate_limited(ip: str) -> bool:
             stale = [k for k, b in _rate_buckets.items() if b and now - b[-1] > RATE_WINDOW_S]
             for k in stale:
                 del _rate_buckets[k]
-            if len(_rate_buckets) > 50_000:  # still over budget — drop oldest-inserted as a fallback
+            if len(_rate_buckets) > 50_000:  # still over budget, drop oldest-inserted as a fallback
                 for k in list(_rate_buckets.keys())[:10_000]:
                     del _rate_buckets[k]
         return False
@@ -594,7 +591,7 @@ def _rate_limited(ip: str) -> bool:
 
 
 def _root_variant() -> str:
-    return root_variant_at(datetime.now(timezone.utc))
+    return root_variant_at(datetime.now(UTC))
 
 
 def current_variant_name(path: str) -> str | None:
@@ -627,7 +624,7 @@ def _safe_command_summary(command: str) -> dict:
     redacted = re.sub(
         r"(?i)\b(password|passwd|token|api[_-]?key|secret)=\S+",
         r"\1=<redacted>",
-        redacted,
+        redacted
     )
     return {
         "command": redacted,
@@ -722,7 +719,7 @@ def _headers_haystack(hdrs_raw: list) -> str:
 # Bodies are capped (BODY_CAP/BODY_EXCERPT_CAP) but header values were not, so a
 # single request carrying a ~1MB header value (within Go/Caddy's default
 # MaxHeaderBytes) wrote ~1MB into one JSONL line. At the per-IP rate limit that
-# is a few MB/s of disk from one source — a cheap way to fill the disk and
+# is a few MB/s of disk from one source, a cheap way to fill the disk and
 # silence collection. Truncate for storage; the length is retained.
 HEADER_VALUE_CAP = 4_000
 HEADERS_TOTAL_CAP = 32_000
@@ -747,7 +744,7 @@ def _redaction_digest(value: str) -> str:
 
 def _sensitive_label(name: str, value: str) -> str:
     if name.endswith("authorization"):
-        # "Bearer", "Basic", … — the scheme is signal, the credential is not.
+        # "Bearer", "Basic", …, the scheme is signal, the credential is not.
         return value.split(" ", 1)[0][:32] or "unknown"
     if "cookie" in name:
         return "cookie"
@@ -775,7 +772,7 @@ def _headers_for_log(headers: dict) -> dict:
     return capped
 
 
-# Some formatters serve only a PREFIX of the id rather than the whole thing —
+# Some formatters serve only a PREFIX of the id rather than the whole thing, #
 # formatters.db_password is tok[:12], and db_connection_string embeds the same
 # 12-char slice. Matching on the full 16 could therefore never fire for those
 # kinds (~14% of everything issued), so a replayed database password looked
@@ -787,7 +784,7 @@ def _headers_for_log(headers: dict) -> dict:
 # of silently falling outside it. That is the bug class this whole comment
 # exists because of; a constant here would just wait to go stale again.
 TOKEN_PREFIX_LEN = MIN_SERVED_TOKEN_LEN
-_HEX_RUN_RE = re.compile(r"[0-9a-f]{%d,}" % TOKEN_PREFIX_LEN)
+_HEX_RUN_RE = re.compile(rf"[0-9a-f]{{{TOKEN_PREFIX_LEN},}}")
 MAX_TOKEN_CANDIDATES = 4_000            # backstop on pathological hex-dense input
 
 
@@ -838,8 +835,7 @@ async def _check_honeytoken_reuse(path: str, query: str, body: bytes,
 
 
 async def _read_capped_body(request: Request) -> tuple[bytes, bool]:
-    """Stream the body, never buffering more than BODY_CAP bytes total —
-    applied as a hard read-abort (not just a post-hoc log truncation) so a
+    """Stream the body, never buffering more than BODY_CAP bytes total, applied as a hard read-abort (not just a post-hoc log truncation) so a
     lying or absent Content-Length, or a chunked upload, cannot buffer more
     than that regardless. Returns (bytes_read, exceeded)."""
     chunks = []
@@ -861,8 +857,8 @@ async def _read_capped_body(request: Request) -> tuple[bytes, bool]:
     except ClientDisconnect:
         # A client that promises a Content-Length and then goes away mid-body is
         # ordinary scanner behaviour (timeouts, resets, fire-and-forget POSTs).
-        # Letting this propagate meant the request was never logged at all — the
-        # exception fires before the middleware writes its record — so the most
+        # Letting this propagate meant the request was never logged at all, the
+        # exception fires before the middleware writes its record, so the most
         # abrupt scanners were the ones systematically missing from the data.
         # Keep what arrived and let the caller log it.
         pass
@@ -870,8 +866,8 @@ async def _read_capped_body(request: Request) -> tuple[bytes, bool]:
 
 
 # --------------------------------------------------------------------------- #
-# Request telemetry middleware. Logs every request per SPEC §6 — including
-# rate-limited and oversized ones, so a burst/flood still leaves a trace —
+# Request telemetry middleware. Logs every request per SPEC §6, including
+# rate-limited and oversized ones, so a burst/flood still leaves a trace, #
 # then lets the route handler run. Body is read once here (capped) and
 # stashed on request.state so downstream handlers reuse it without
 # re-reading the stream.
@@ -882,7 +878,7 @@ async def telemetry_mw(request: Request, call_next):
     hdrs, hdrs_raw = _headers_first_wins(request)
     ip = client_ip(hdrs, request.client.host if request.client else "")
 
-    # The container healthcheck polls /healthz from loopback every 60s — ~1,440
+    # The container healthcheck polls /healthz from loopback every 60s, ~1,440
     # hits/day against a real-traffic baseline of a few hundred, which would
     # swamp the dataset it exists to protect. Anything arriving through Caddy
     # carries X-Forwarded-For, so an OUTSIDE probe of /healthz still gets
@@ -919,7 +915,7 @@ async def telemetry_mw(request: Request, call_next):
 
     if _rate_limited(ip):
         # Skip the (relatively costly) body read on a flood, but still log
-        # the hit — a silent gap here would be exactly the burst traffic
+        # the hit, a silent gap here would be exactly the burst traffic
         # SPEC §8's cadence analysis most needs to see.
         await log_request(429, "rate-limited", body_len=0, body_excerpt="")
         # Reuse detection used to sit below this early return, so a replayed
@@ -947,7 +943,7 @@ async def telemetry_mw(request: Request, call_next):
         await check_attack_patterns(request.url.path, str(request.url.query),
                                     raw.decode("utf-8", "replace"), hdrs,
                                     body_available=False, headers_raw=hdrs_raw)
-        # We stopped reading mid-body without draining the rest — force the
+        # We stopped reading mid-body without draining the rest, force the
         # connection closed rather than let it be reused, so leftover bytes
         # can't be misparsed as the start of the next request on this socket.
         return PlainTextResponse("payload too large", status_code=413,
@@ -1161,8 +1157,7 @@ def infer_credential_submission(request: Request, body: bytes) -> None:
     else fell through to catch_all and the raw body was written to
     body_excerpt verbatim. /admin is advertised in robots.txt and sitemap.xml
     but only registers GET, so a stuffing tool that POSTed to the advertised
-    URL rather than the form's action had its credentials stored in full —
-    which is exactly the material the non-retention rule exists to not keep,
+    URL rather than the form's action had its credentials stored in full, which is exactly the material the non-retention rule exists to not keep,
     since credentials sprayed at a honeypot are usually stolen from a third
     party who has nothing to do with any of this.
 
@@ -1204,7 +1199,7 @@ async def healthz():
     {"ok": true} reported a healthy service that was collecting nothing. Gate
     on the writer's own error counter and on free space.
 
-    The response body stays exactly {"ok": bool} — this route is reachable from
+    The response body stays exactly {"ok": bool}, this route is reachable from
     the internet, and disk figures or failure counts would both leak operator
     detail and read as an unusual thing for the app this pretends to be. Detail
     goes to stderr and the container log instead.
@@ -1499,7 +1494,7 @@ async def admin_login_submit(request: Request):
 
 
 # Fingerprinted panel lures (2026-07 addition): the generic /admin form above
-# gets found but never gets POSTed to — real credential-stuffing toolkits key
+# gets found but never gets POSTed to, real credential-stuffing toolkits key
 # on KNOWN product signatures, not a bare <form>. These three match what
 # actual stuffing tooling fingerprints before it bothers submitting.
 
@@ -1534,12 +1529,12 @@ async def wp_login_form(request: Request):
 async def wp_login_submit(request: Request):
     mark(request, "admin")
     mark_panel_credentials(request)
-    # Real WordPress renders the error INLINE at 200, not a 401/403 — matching
+    # Real WordPress renders the error INLINE at 200, not a 401/403, matching
     # that is part of the fingerprint; a stuffing tool checking status code
     # alone would otherwise learn nothing from a non-200 response here.
-    error = (f'<div id="login_error">ERROR: The password you entered for the '
-             f'submitted username is incorrect. '
-             f'<a href="/wp-login.php?action=lostpassword">Lost your password?</a></div>')
+    error = ('<div id="login_error">ERROR: The password you entered for the '
+             'submitted username is incorrect. '
+             '<a href="/wp-login.php?action=lostpassword">Lost your password?</a></div>')
     resp = HTMLResponse(_WP_LOGIN_FORM.format(meta=VARIANTS["wordpress"]["meta"], error=error))
     apply_variant_headers(resp, "/wp-login.php")
     return resp
@@ -1575,7 +1570,7 @@ _PHPMYADMIN_FORM = """<!doctype html>
 
 def _pma_token() -> str:
     # phpMyAdmin's real CSRF token is a long hex string tied to the PHP
-    # session — this is a fresh, unlinkable random value, never checked or
+    # session, this is a fresh, unlinkable random value, never checked or
     # stored, present purely so the field looks structurally correct.
     return uuid.uuid4().hex + uuid.uuid4().hex
 
@@ -1612,7 +1607,7 @@ _TOMCAT_401_BODY = """<html><head><title>Apache Tomcat/8.5.39 - Error report</ti
 @app.get("/manager/html")
 @app.get("/manager/status")
 async def tomcat_manager(request: Request):
-    # Real Tomcat Manager gates on HTTP Basic Auth, not a login form — always
+    # Real Tomcat Manager gates on HTTP Basic Auth, not a login form, always
     # 401, whether or not credentials were even offered, matching what a
     # default/never-configured manager install actually does.
     mark(request, "admin")
@@ -1782,10 +1777,10 @@ async def graphql(request: Request):
 
 
 # --------------------------------------------------------------------------- #
-# 4.4 Landing page(s) — leaked-key-in-page lure + fake-version banner.
+# 4.4 Landing page(s), leaked-key-in-page lure + fake-version banner.
 #
 # "/" rotates through all three variants over time (SPEC §4.3's original
-# design) — useful for a long-running single-page comparison, but it means
+# design), useful for a long-running single-page comparison, but it means
 # at any given moment only ONE variant is actually live, confounding "which
 # fake version draws more follow-up" with "what else was happening on the
 # internet that week". /app, /site, and /legacy (2026-07 addition) each pin
@@ -1802,7 +1797,7 @@ async def landing(request: Request):
     # (SPEC §4.3) as much as the leaked-key lure below.
     #
     # Known limitation (SPEC §5): a Maps key's "use" is a call to Google's own
-    # API, which we cannot intercept — same bare-key limitation as the AWS/
+    # API, which we cannot intercept, same bare-key limitation as the AWS/
     # GitHub/Stripe/OpenAI kinds. Reuse detection for this one relies solely
     # on the value reappearing elsewhere (analyze.py's circumstantial-reuse
     # scan), same as any other non-catcher-embedded kind.
@@ -1823,7 +1818,7 @@ async def landing(request: Request):
 
 
 # --------------------------------------------------------------------------- #
-# 4.5 robots.txt / sitemap.xml — LIST the bait paths (inverse of a real robots.txt)
+# 4.5 robots.txt / sitemap.xml, LIST the bait paths (inverse of a real robots.txt)
 # --------------------------------------------------------------------------- #
 BAIT_PATHS = [
     "/.env", "/.git/config", "/.git/HEAD", "/.git/index", "/config.json", "/backup.sql",
@@ -1854,7 +1849,7 @@ async def sitemap_xml(request: Request):
 
 
 # --------------------------------------------------------------------------- #
-# Honeytoken trigger catcher (SPEC §5) — a hit here proves "use", not just issuance.
+# Honeytoken trigger catcher (SPEC §5), a hit here proves "use", not just issuance.
 # --------------------------------------------------------------------------- #
 @app.api_route("/x/{token}", methods=["GET", "POST"])
 async def trigger_catcher(request: Request, token: str):
@@ -1882,7 +1877,7 @@ async def trigger_catcher(request: Request, token: str):
 
 
 # --------------------------------------------------------------------------- #
-# Catch-all 404 — path scanning without a hit is itself signal (SPEC §4.5).
+# Catch-all 404, path scanning without a hit is itself signal (SPEC §4.5).
 # Registered last so every route above takes precedence.
 # --------------------------------------------------------------------------- #
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"])

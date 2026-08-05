@@ -57,7 +57,7 @@ secret-file path hit counts (route_kind=secret-file):
    sessions hitting both '.git/HEAD' & '.git/config': 0 (.git/HEAD-first: 0, .git/config-first: 0)
    sessions hitting both '.env' & 'wp-config.php': 0 (.env-first: 0, wp-config.php-first: 0)
 
-CVE hits — LIVE (what the deployed signatures flagged at the time):
+CVE hits, LIVE (what the deployed signatures flagged at the time):
    payload-bearing exploit attempts: 1 hit(s) across 1 signature(s)
      id                      hits   IPs  w/body  first seen                 since
      CVE-2021-44228             1     1       0  2026-07-11T09:14:00+00:00  2026-07-11
@@ -68,7 +68,7 @@ CVE hits — LIVE (what the deployed signatures flagged at the time):
 cve_pattern_match by advertised-version variant:
         1  struts
 
-CVE hits — RESCAN (current signatures re-applied to retained records):
+CVE hits, RESCAN (current signatures re-applied to retained records):
    payload-bearing exploit attempts: 3 hit(s) across 3 signature(s)
      id                      hits   IPs  w/body  first seen                 since
      CVE-2021-44228             1     1       0  2026-07-11T09:14:00+00:00  2026-07-11
