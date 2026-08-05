@@ -1,8 +1,6 @@
 # http-bait
 
-[![ci](https://github.com/brian-mitchell-sec/http-
-bait/actions/workflows/ci.yml/badge.svg)](https://github.com/brian-mitchell-
-sec/http-bait/actions/workflows/ci.yml)
+[![ci](https://github.com/brian-mitchell-sec/http-bait/actions/workflows/ci.yml/badge.svg)](https://github.com/brian-mitchell-sec/http-bait/actions/workflows/ci.yml)
 
 An HTTP honeypot built to measure **exploitation** rather than discovery.
 
@@ -46,6 +44,25 @@ python3 analyze.py fixtures/sample_events.jsonl --rescan
 The live pass finds one CVE. Re-applying the current signature set to the same retained
 records finds five, including one whose signature postdates the traffic it matches by
 five days. Nothing about the traffic changed; only the detector did.
+
+```
+CVE hits, LIVE (what the deployed signatures flagged at the time):
+   payload-bearing exploit attempts: 1 hit(s) across 1 signature(s)
+     id                      hits   IPs  w/body  first seen                 since
+     CVE-2021-44228             1     1       0  2026-07-11T09:14:00+00:00  2026-07-11
+
+CVE hits, RESCAN (current signatures re-applied to retained records):
+   payload-bearing exploit attempts: 3 hit(s) across 3 signature(s)
+     CVE-2021-44228             1     1       0  2026-07-11T09:14:00+00:00  2026-07-11
+     CVE-2022-22965             1     1       1  2026-07-11T11:00:00+00:00  initial
+     CVE-2025-55182             1     1       1  2026-07-14T18:05:00+00:00  2026-07-19
+   vulnerability probes (path/marker only): 2 hit(s) across 2 signature(s)
+     CVE-2017-9841              1     1       0  2026-07-13T02:20:00+00:00  2026-08-04
+     CVE-2024-27956             1     1       0  2026-07-15T07:00:00+00:00  2026-08-03
+```
+
+CI re-runs this exact comparison on every push and fails if the analyzer's output drifts
+from the frozen report by a single byte.
 
 [DETECTORS.md](DETECTORS.md) lists every signature and when it shipped, so you can tell
 which of your own counts could only have come from a rescan.
@@ -182,6 +199,13 @@ Read [SPEC.md §2](SPEC.md) before deploying. The short version, all of it load-
 
 Running this points a deliberately attackable surface at the internet under your name.
 Give it its own host and a hostname with no association to anything else you run.
+
+## Sister project
+
+[workspace-tools-mcp](https://github.com/brian-mitchell-sec/workspace-tools-mcp)
+applies the same thesis — measure use, not connection counts — to AI agents: a research
+MCP server that logs what connecting agents actually do, including whether they follow
+instructions injected by the server itself.
 
 ## Layout
 

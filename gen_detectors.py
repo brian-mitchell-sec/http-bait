@@ -47,9 +47,9 @@ both, with the `since` value beside each row.
 
 - a date: the day that signature's **current form** shipped
 - `initial`: present when collection began
-- `unknown`: the signature is known to have changed, but this repository is a
-  single squashed commit and the date is not recoverable from it. Do not guess
-  one. Reconcile against the development history before citing a timeline.
+- `unknown`: the signature is known to have changed and no date is recoverable
+  from the repository's own history (`git log -S <id> -- app/`). If this ever
+  occurs, say concretely why. Do not guess one.
 """)
 
 emit("## CVE and exploit signatures\n")

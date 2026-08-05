@@ -65,6 +65,12 @@ UA_CAP = 1_000
 PATH_CAP = 2_000
 QUERY_CAP = 4_000
 XFF_CAP = 1_000
+# session is "ip|ua" packed for the reuse-analysis grouping key. Until it was
+# capped, a >128KB User-Agent pushed the whole honeytoken_issued record over
+# RECORD_MAX_BYTES, the oversize backstop dropped token/kind/route, and the
+# issuance — the record that makes later reuse attributable — was silently
+# destroyed. SESSION_CAP bounds ip + separator + ua with headroom.
+SESSION_CAP = XFF_CAP + 1 + UA_CAP
 FINGERPRINT_CAP = 256
 HEADER_ORDER_CAP = 100
 RECORD_MAX_BYTES = 128 * 1024
@@ -184,7 +190,8 @@ class JsonlWriter:
                 # dropping the event entirely.
                 keep = {k: record.get(k) for k in
                         ("ts", "event", "window", "ip", "method", "path",
-                         "status_served", "route_kind", "request_id")
+                         "status_served", "route_kind", "request_id",
+                         "token", "kind", "route")
                         if record.get(k) is not None}
                 keep["oversize_record"] = True
                 keep["original_len"] = len(line)
@@ -312,8 +319,8 @@ async def honeytoken(kind: str, session: str, route: str) -> str | dict:
     # be built from one of them.
     issued_ip, _, issued_ua = session.partition("|")
     await alog({"event": "honeytoken_issued", "kind": kind, "token": tok,
-                "route": route, "session": session,
-                "ip": issued_ip, "ua": _cap(issued_ua, UA_CAP)})
+                "route": route, "session": _cap(session, SESSION_CAP),
+                "ip": _cap(issued_ip, XFF_CAP), "ua": _cap(issued_ua, UA_CAP)})
     return FORMATTERS[kind](tok, catcher_url)
 
 

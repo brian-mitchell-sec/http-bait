@@ -12,9 +12,9 @@ both, with the `since` value beside each row.
 
 - a date: the day that signature's **current form** shipped
 - `initial`: present when collection began
-- `unknown`: the signature is known to have changed, but this repository is a
-  single squashed commit and the date is not recoverable from it. Do not guess
-  one. Reconcile against the development history before citing a timeline.
+- `unknown`: the signature is known to have changed and no date is recoverable
+  from the repository's own history (`git log -S <id> -- app/`). If this ever
+  occurs, say concretely why. Do not guess one.
 
 ## CVE and exploit signatures
 
@@ -28,12 +28,12 @@ Report the two counts separately.
 | `CVE-2025-55182` | **exploit** | raw body and its percent-decoded form | 2026-07-19 |
 | `CVE-2022-22965` | **exploit** | path, query, body and Content-Type | initial |
 | `CVE-2017-5638` | **exploit** | Content-Type header | initial |
-| `CVE-2018-11776` | **exploit** | path + query | unknown |
+| `CVE-2018-11776` | **exploit** | path + query | 2026-08-04 |
 | `CVE-2016-1000027` | **exploit** | path, query, body and Content-Type | initial |
 | `WP-XMLRPC-PINGBACK` | **probe** | path, query, body and Content-Type | initial |
 | `CVE-2020-25213` | **probe** | path, query, body and Content-Type | 2026-08-03 |
 | `CVE-2021-44228` | **exploit** | every occurrence of every header | 2026-07-11 |
-| `CVE-2017-9841` | **probe** | path + query | unknown |
+| `CVE-2017-9841` | **probe** | path + query | 2026-08-04 |
 | `CVE-2024-27956` | **probe** | path + query | 2026-08-03 |
 
 ## Tool-invocation signatures

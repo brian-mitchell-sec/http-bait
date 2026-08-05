@@ -89,10 +89,14 @@ def root_variant_at(ts: datetime) -> str:
 # `analyze.py --rescan` prints it beside every count so a reader can see which
 # rows could only have come from a rescan.
 #
-# UNVERIFIED-DATE MARKER: entries reading "unknown" have a documented change but
-# no date recoverable from this repository's history (it is a single squashed
-# commit). Reconcile them against the development history before citing a
-# detector timeline anywhere. Do not guess.
+# Dates come from the repository's own history (`git log -S <cve> -- app/`):
+# the signature table shipped 2026-08-03 (687954c) and the kind field that
+# completes each entry's current form landed 2026-08-04 (184ef59). An earlier
+# revision of this comment claimed the dates were unrecoverable because the
+# repository was "a single squashed commit"; that was false — the history was
+# never squashed — and a provenance artifact whose premise fails one `git log`
+# is worse than no date at all. If a date is ever genuinely unrecoverable, mark
+# it "unknown" and say why, concretely. Do not guess.
 #
 # Scopes: "path" (path + "?" + query), "content-type", "headers" (every
 # occurrence of every header), "body" (raw + percent-decoded), "any" (union of
@@ -130,7 +134,7 @@ CVE_SIGNATURES = [
     # spells it `ognl.OgnlContext` with a dot, not `ognl:`. The previous
     # pattern required `${` first and a trailing colon, so it matched none of
     # the shapes actually seen in the wild, a detector that could never fire.
-    ("CVE-2018-11776", re.compile(r"(redirect(action)?:|@?ognl[.:])", re.I), "path", "unknown", "exploit"),
+    ("CVE-2018-11776", re.compile(r"(redirect(action)?:|@?ognl[.:])", re.I), "path", "2026-08-04", "exploit"),
     # Spring Framework HttpInvoker deserialization. The advertised Spring Boot
     # banner is what draws these; the probe itself targets the remoting
     # endpoint rather than the actuator write-env chain. (The comment on this
@@ -154,9 +158,10 @@ CVE_SIGNATURES = [
     ("CVE-2021-44228", re.compile(r"\$\{jndi:", re.I), "headers", "2026-07-11", "exploit"),
     # PHPUnit eval-stdin.php RCE, the path alone is the exploit. A generic,
     # stack-agnostic probe like Log4Shell, commonly seen riding along in
-    # round-robin scan bursts. Added after the first release; the exact date is
-    # not recoverable from this repository.
-    ("CVE-2017-9841", re.compile(r"phpunit.*eval-stdin\.php", re.I), "path", "unknown", "probe"),
+    # round-robin scan bursts. The signature table entry shipped 2026-08-03 and
+    # gained its kind classification 2026-08-04, so its current form dates from
+    # the latter.
+    ("CVE-2017-9841", re.compile(r"phpunit.*eval-stdin\.php", re.I), "path", "2026-08-04", "probe"),
     # WP-Automatic auth-bypass SQLi. The probe is a request to the plugin's CSV
     # handler; the injected SQL rides in the query string. Path-scoped for the
     # same reason as PHPUnit above: reaching this endpoint at all is the

@@ -76,7 +76,7 @@ CVE hits, RESCAN (current signatures re-applied to retained records):
      CVE-2025-55182             1     1       1  2026-07-14T18:05:00+00:00  2026-07-19
    vulnerability probes (path/marker only): 2 hit(s) across 2 signature(s)
      id                      hits   IPs  w/body  first seen                 since
-     CVE-2017-9841              1     1       0  2026-07-13T02:20:00+00:00  unknown
+     CVE-2017-9841              1     1       0  2026-07-13T02:20:00+00:00  2026-08-04
      CVE-2024-27956             1     1       0  2026-07-15T07:00:00+00:00  2026-08-03
    Quote the two separately. `w/body` counts probe hits that did carry a
    body, which is the subset worth reviewing by hand for promotion.
@@ -97,10 +97,11 @@ issuance by kind:
 confirmed triggers by kind:
         1  slack_webhook
 
-circumstantial reuse hits (issued value reappearing later elsewhere): 2
-   matched by form: {'full': 1, 'prefix': 1}
+circumstantial reuse hits (issued value reappearing later elsewhere): 3
+   matched by form: {'full': 2, 'prefix': 1}
    github_pat             issued@/.git/config         -> seen@/api/secrets (2026-07-10T04:31:05+00:00, full, 198.51.100.0/24)
    db_password            issued@/.env                -> seen@/db/connect (2026-07-10T05:02:00+00:00, prefix, 203.0.113.0/24)
+   slack_webhook          issued@/config.json         -> seen@/x/9988776655443322 (2026-07-21T14:06:00+00:00, full, 198.51.100.0/24)
 runtime reuse events recorded by the service: 1
 
 credential submissions: 2

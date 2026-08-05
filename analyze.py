@@ -65,9 +65,16 @@ CLOUD = {
 # Matches app/formatters.SERVED_TOKEN_LEN's minimum. Imported rather than
 # redeclared where possible; kept here as a fallback so the analyzer still runs
 # against a log copied somewhere without the app/ directory beside it.
+# ImportError only: a broad except used to swallow ANY breakage in
+# formatters.py and silently revert the scan width to 12 — the same
+# constant-goes-stale bug the import exists to prevent. Now only a genuinely
+# absent app/ directory falls back, and it does so loudly.
 try:
     from formatters import MIN_SERVED_TOKEN_LEN as TOKEN_PREFIX_LEN  # noqa: E402
-except Exception:  # pragma: no cover - only when app/ is absent
+except ImportError:  # pragma: no cover - only when app/ is absent
+    print("analyze.py: WARNING: app/formatters.py not importable; falling back "
+          "to TOKEN_PREFIX_LEN=12. The token-prefix scan width may have drifted "
+          "from the app's served lengths.", file=sys.stderr)
     TOKEN_PREFIX_LEN = 12
 
 
@@ -553,8 +560,17 @@ def main():
     hex_run_re = re.compile(rf"[0-9a-f]{{{TOKEN_PREFIX_LEN},}}")
     reuse_hits = []
     for r in reqs:
+        # The runtime detector (main._check_honeytoken_reuse) scans path, query,
+        # body and headers; this scan used to omit path, so a token replayed
+        # only in the request path fired live and was invisible here — the two
+        # reuse numbers could never reconcile, undocumented. The blob now covers
+        # the same four locations. Remaining asymmetry, deliberate: the
+        # exclusions below (same-route, not-later-than-issuance) are offline
+        # heuristics the runtime does not apply, so this count is conservative
+        # relative to the live one and the two are not expected to be equal.
         blob = " ".join([json.dumps(r.get("headers", {})),
-                         r.get("body_excerpt", ""), r.get("query", "")]).lower()
+                         r.get("body_excerpt", ""), r.get("query", ""),
+                         r.get("path", "")]).lower()
         ts, path = r.get("ts", ""), r.get("path", "")
         seen = {}
         for run in hex_run_re.finditer(blob):

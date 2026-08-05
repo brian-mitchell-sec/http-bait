@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+Fixes from an external adversarial review of the repository itself. Each is in
+a failure class this project claims to hunt, which is exactly why they matter.
+
+- **Oversized User-Agents no longer destroy issuance records.**
+  `honeytoken_issued` logged `session` (ip|ua) uncapped; a >128KB UA pushed the
+  record over `RECORD_MAX_BYTES`, the backstop's keep-list dropped
+  token/kind/route, and the issuance — the record that makes later reuse
+  attributable — was silently deleted with no eviction event to bound the null.
+  `session` is now capped (`SESSION_CAP`) and the oversize keep-list retains
+  token/kind/route. Regression test: a 1MB UA must not lose an issuance, and
+  the index must rebuild from the surviving records.
+- **The offline reuse scan now sees what the live one sees.** The runtime
+  detector scans path, query, body and headers; `analyze.py` omitted path, so
+  a token replayed only in the request path fired live and was invisible in
+  the report findings come from. The fixture itself contained such a replay
+  (slack_webhook issued at `/config.json`, replayed to `/x/...` by a different
+  address): the frozen report now counts it, going from 2 circumstantial hits
+  to 3. The remaining live/offline asymmetry (offline same-route/time
+  exclusions) is documented at the scan site.
+- **The "single squashed commit" provenance claim removed.** `signatures.py`
+  and the generated `DETECTORS.md` justified two `since: "unknown"` entries by
+  claiming the repository was one squashed commit. It was not; `git log -S`
+  dates both signatures' current forms to 2026-08-04. A provenance artifact
+  whose premise fails one command is worse than no date at all.
+- **The live-canary state machine has tests.** `get_live_aws_pair()` — the
+  code whose failure harms canarytokens.org, not us — had zero coverage. Now:
+  the servings cap is a hard bound (exhausted cache returns None, never
+  over-serves), the retry floor bounds outbound mint attempts to one per
+  window under an outage, an exhausted cache is not served after a failed
+  remint, a merely time-stale cache keeps serving, and a mint exception
+  degrades to the synthetic formatter instead of a 500.
+- `analyze.py`'s `TOKEN_PREFIX_LEN` fallback narrowed to `ImportError` and made
+  loud; a broad `except` silently reverted the scan width on any breakage in
+  `formatters.py`, the constant-goes-stale bug the import exists to prevent.
+- `pull-telemetry.sh` honors `SSH_USER` like `deploy.sh` does; the CI badge
+  URL had a literal newline in it and rendered as broken text; the README now
+  shows the live-vs-rescan fixture output instead of only describing it, and
+  links the sister MCP project.
+
 ## v0.1.2, 2026-08-04
 
 Fork-and-run fixes. No behaviour change to the service; this release is about

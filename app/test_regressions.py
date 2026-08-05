@@ -674,7 +674,11 @@ def test_window_filter_reaches_derived_events():
 def test_exclude_ip_reaches_issuances_and_reuse():
     fixture = REPO_ROOT / "fixtures" / "sample_events.jsonl"
     out = run_analyze(str(fixture), "--exclude-ip", "198.51.100.10").stdout
-    assert "circumstantial reuse hits (issued value reappearing later elsewhere): 0" in out
+    # The excluded address's own reuse hit drops to zero, but the fixture also
+    # contains a path-only replay from a *different* address (198.51.100.80)
+    # that the offline scan could not see before the live/offline parity fix;
+    # it correctly survives the exclusion.
+    assert "circumstantial reuse hits (issued value reappearing later elsewhere): 1" in out
     assert "honeytoken_issued: 1" in out, out[:600]
     print("  excluding a self-test address drops its issuances and its reuse hit")
 
@@ -718,3 +722,176 @@ def test_security_txt_does_not_advertise_an_unmonitored_address():
         assert "http-bait.example" not in body, body
         assert "No operator contact configured" in body, body
     print("  security.txt says it is unconfigured rather than naming a dead mailbox")
+
+
+# --------------------------------------------------------------------------- #
+# 2026-08 adversarial-review fixes: issuance destruction, live/offline parity,
+# and the live-canary state machine.
+# --------------------------------------------------------------------------- #
+def test_oversize_user_agent_does_not_destroy_issuance():
+    """honeytoken_issued logged `session` (ip|ua) uncapped while every field
+    beside it was capped. A >128KB UA pushed the whole record over
+    RECORD_MAX_BYTES, the backstop's keep-list dropped token/kind/route, and
+    the issuance — the record that makes later reuse attributable — vanished
+    with no eviction event to bound the null. SESSION_CAP and the extended
+    keep-list close both halves."""
+    import main
+    c = TestClient(main.app)
+    c.get("/.env", headers={"user-agent": "A" * 1_000_000})
+    issued = [e for e in events("honeytoken_issued") if e.get("route") == "/.env"]
+    assert issued, "no issuance recorded at all for a 1MB-UA request"
+    for rec in issued:
+        assert rec.get("token"), f"issuance lost its token: {rec}"
+        assert rec.get("kind") and rec.get("route"), f"issuance lost kind/route: {rec}"
+    assert not any(e.get("oversize_record") for e in issued), \
+        "an issuance record still went oversize"
+    # Post-restart attribution depends on these records surviving on disk.
+    clear_token_index(main)
+    assert main.rebuild_issued_token_index() >= len(issued)
+    print(f"  1MB UA: {len(issued)} issuances intact, index rebuilds from them")
+
+
+def test_live_reuse_detector_sees_path_replays():
+    import main
+    c = TestClient(main.app)
+    c.get("/.env")
+    tok = events("honeytoken_issued")[-1]["token"]
+    with reuse_events() as after:
+        c.get(f"/replay/{tok}")
+    assert after, "replay in the request path not detected live"
+    assert after[-1]["token"] == tok and after[-1]["seen_in"] == "path"
+    print("  live detector: replay in path detected")
+
+
+def test_offline_reuse_scan_sees_path_replays():
+    """The offline scan built its blob from headers+body+query only, so a token
+    replayed only in the request path fired live and was invisible in the
+    report findings come from — live and offline counts that could never
+    reconcile. The blob now covers the same four locations as the runtime."""
+    import tempfile
+    issue = {"ts": "2026-08-05T00:00:00+00:00", "event": "honeytoken_issued",
+             "window": "w", "kind": "db_password", "token": "0123456789abcdef",
+             "route": "/.env", "session": "", "ip": "203.0.113.1", "ua": ""}
+    req = {"ts": "2026-08-05T01:00:00+00:00", "event": "request", "window": "w",
+           "ip": "203.0.113.9", "ua": "x", "method": "GET",
+           "path": "/replay/0123456789abcdef", "query": "", "headers": {},
+           "status_served": 404, "route_kind": "catch-all",
+           "body_len": 0, "body_excerpt": ""}
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        fh.write(json.dumps(issue) + "\n" + json.dumps(req) + "\n")
+        tmp = fh.name
+    out = run_analyze(tmp).stdout
+    assert "circumstantial reuse hits (issued value reappearing later elsewhere): 1" \
+        in out, f"offline scan still misses a path-only replay:\n{out}"
+    print("  offline analyzer: replay in path counted (live/offline parity)")
+
+
+def _reset_live_aws(main):
+    main._live_aws_cache = None
+    main._live_aws_minted_at = 0.0
+    main._live_aws_minted_generation = None
+    main._live_aws_last_attempt_at = 0.0
+    main._live_aws_servings = 0
+
+
+def test_canary_servings_cap_is_a_hard_bound(monkeypatch):
+    """The servings cap bounds how many visitors a real-world trigger can
+    implicate. An exhausted cache must return None — never over-serve the real
+    key while the retry floor blocks a remint."""
+    import asyncio
+    import main
+    _reset_live_aws(main)
+    monkeypatch.setattr(main, "CANARYTOKENS_LIVE", True)
+    monkeypatch.setattr(main, "CANARYTOKENS_MAX_SERVINGS", 5)
+    mints = []
+
+    async def fake_mint():
+        mints.append(1)
+        return {"aws_access_key_id": "AKIAFAKEEXAMPLE1", "aws_secret_access_key": "x"}
+
+    monkeypatch.setattr(main, "_mint_live_aws_pair", fake_mint)
+    got = [asyncio.run(main.get_live_aws_pair()) for _ in range(10)]
+    assert all(p is not None for p in got[:5]), "first 5 servings should succeed"
+    assert all(p is None for p in got[5:]), "exhausted pair kept being served"
+    assert len(mints) == 1 and main._live_aws_servings == 5
+    print("  servings cap holds at 5, then None (no over-serving, 1 mint)")
+
+
+def test_canary_failed_mint_respects_retry_floor(monkeypatch):
+    """Every aws_pair route hit during a canarytokens.org outage must not become
+    its own outbound mint attempt — a third-party DoS vector the floor exists
+    to bound."""
+    import asyncio
+    import main
+    _reset_live_aws(main)
+    monkeypatch.setattr(main, "CANARYTOKENS_LIVE", True)
+    attempts = []
+
+    async def failing_mint():
+        attempts.append(1)
+        return None
+
+    monkeypatch.setattr(main, "_mint_live_aws_pair", failing_mint)
+    got = [asyncio.run(main.get_live_aws_pair()) for _ in range(20)]
+    assert all(p is None for p in got)
+    assert len(attempts) == 1, \
+        f"{len(attempts)} outbound mint attempts inside one cooldown window"
+    print("  20 requests during an outage -> exactly 1 outbound attempt")
+
+
+def test_canary_exhausted_cache_not_served_after_failed_remint(monkeypatch):
+    """Cooldown passed, remint attempted and failed, cache exhausted: the
+    anonymity-set bound still wins over availability."""
+    import asyncio
+    import main
+    _reset_live_aws(main)
+    monkeypatch.setattr(main, "CANARYTOKENS_LIVE", True)
+    main._live_aws_cache = {"aws_access_key_id": "AKIAOLDEXAMPLE99",
+                            "aws_secret_access_key": "y"}
+    main._live_aws_minted_at = time.monotonic()
+    main._live_aws_servings = main.CANARYTOKENS_MAX_SERVINGS
+
+    async def failing_mint():
+        return None
+
+    monkeypatch.setattr(main, "_mint_live_aws_pair", failing_mint)
+    assert asyncio.run(main.get_live_aws_pair()) is None
+    print("  exhausted cache returns None after a failed remint")
+
+
+def test_canary_time_stale_cache_still_serves_during_floor(monkeypatch):
+    """The exhausted-vs-stale distinction: merely time-stale (still under the
+    servings budget) degrades to last-good, not to nothing."""
+    import asyncio
+    import main
+    _reset_live_aws(main)
+    monkeypatch.setattr(main, "CANARYTOKENS_LIVE", True)
+    cached = {"aws_access_key_id": "AKIASTALEEXAMPLE", "aws_secret_access_key": "z"}
+    main._live_aws_cache = cached
+    main._live_aws_minted_at = time.monotonic() - main.CANARYTOKENS_REFRESH_SECS - 1
+    main._live_aws_servings = 1
+    main._live_aws_last_attempt_at = time.monotonic()  # floor blocks the remint
+    pair = asyncio.run(main.get_live_aws_pair())
+    assert pair == cached and main._live_aws_servings == 2
+    print("  time-stale (not exhausted) cache keeps serving during the floor")
+
+
+def test_canary_mint_raise_never_reaches_a_visitor(monkeypatch):
+    """_mint_live_aws_pair is documented as never-raising, but the accessor must
+    not rely on that as its only line of defense: a raise degrades to the
+    synthetic formatter, never to a 500."""
+    import asyncio
+    import main
+    _reset_live_aws(main)
+    monkeypatch.setattr(main, "CANARYTOKENS_LIVE", True)
+
+    async def boom():
+        raise RuntimeError("simulated canarytokens outage")
+
+    monkeypatch.setattr(main, "_mint_live_aws_pair", boom)
+    assert asyncio.run(main.get_live_aws_pair()) is None
+    c = TestClient(main.app)
+    r = c.get("/.aws/credentials")
+    assert r.status_code == 200, f"mint raise reached a visitor: {r.status_code}"
+    assert "AKIA" in r.text, "synthetic aws_pair fallback did not serve"
+    print("  mint raise -> None -> synthetic fallback, visitor still gets 200")
