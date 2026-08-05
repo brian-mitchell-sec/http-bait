@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.1.2, 2026-08-04
+
+Fork-and-run fixes. No behaviour change to the service; this release is about
+whether a stranger can stand it up without asking anyone.
+
+- **The JA4 escape hatch works now.** `NOTICE` told operators who cannot accept
+  the FoxIO License 1.1 commercial-use restriction to remove two `--with` lines
+  from `caddy/Dockerfile`. That was not sufficient: the Caddyfile also uses the
+  `ja4` listener wrapper and two directives, and stock Caddy refuses to parse
+  them, exits, and serves nothing. Ships `Caddyfile.nofingerprint`, validated
+  against `caddy:2.8-alpine`, and `docker-compose.nofingerprint.yml`. Anyone who
+  followed the documented licensing route on v0.1.1 got a service that would not
+  start.
+- **`deploy.sh` fails honestly.** Its readiness loop swallowed stderr, so an auth
+  failure, a wrong address and a host that was down all printed "still
+  provisioning" forever. It now probes once, fails in ten seconds with the real
+  error, and suggests `SSH_USER` for the common case of root login being
+  disabled. `READY_TIMEOUT` bounds the wait.
+- **Documented analyzer commands use the log glob.** The singular filename reads
+  one segment after rotation and prints a smaller number with no sign anything
+  is missing. The analyzer now also warns when it finds rotated siblings it was
+  not given.
+- **`DEPLOY.md` gained "After the first deploy"**, covering the gap between the
+  stack reporting healthy and the data being trustworthy: reachability from a
+  third machine, whether TLS actually provisioned, excluding your own address,
+  where `/healthz` failure detail goes, the rotation glob, and build sizing.
+- `HB_OPERATOR_CONTACT` surfaced on the deploy path. `gen_detectors.py` writes
+  `DETECTORS.md` instead of printing it, which is what the docs always claimed.
+  `.dockerignore`, since the build context included collected telemetry. `ruff`
+  config and a CI lint step.
+
 ## v0.1.1, 2026-08-04
 
 Fixes for defects found in review after v0.1.0 was tagged. **v0.1.0 ships a
