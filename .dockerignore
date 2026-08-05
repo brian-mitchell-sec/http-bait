@@ -1,0 +1,13 @@
+# The build context is sent to the daemon in full, and on a deployed host
+# data/ is the collected telemetry, which can be gigabytes. The Dockerfile only
+# COPYs app/, so everything below is pure transfer cost on every redeploy.
+data/
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+fixtures/
+*.local.md
+Caddyfile.deployed
+docker-compose.deployed.yml

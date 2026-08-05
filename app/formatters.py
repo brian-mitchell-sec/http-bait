@@ -2,8 +2,8 @@
 Per-kind fake-secret formatters for the http-bait honeypot.
 
 Every value produced here is a honeytoken: syntactically shaped to pass a casual
-scanner's regex/grep for that credential type, but never a real, usable secret —
-no real key material, no resolvable real backend. Each formatter is a pure
+scanner's regex/grep for that credential type, but never a real, usable secret.
+No real key material, no resolvable real backend. Each formatter is a pure
 function of a random per-issuance token id (minted and logged by main.py's
 honeytoken()) so values are unique and attributable without any shared state.
 """
@@ -58,7 +58,7 @@ def slack_bot_token(tok: str, catcher_url: str | None) -> str:
 
 def slack_webhook(tok: str, catcher_url: str | None) -> str:
     # A webhook URL IS the "use" mechanism, so point it at our own catcher
-    # instead of hooks.slack.com — a POST here is directly observable.
+    # instead of hooks.slack.com. A POST here is directly observable.
     return catcher_url or f"https://hooks.slack.com/services/T{_hex_pad(tok,8,True)}/B{_hex_pad(tok,8,True)}/{tok}"
 
 
@@ -67,9 +67,9 @@ def stripe_secret(tok: str, catcher_url: str | None) -> str:
 
 
 def db_connection_string(tok: str, catcher_url: str | None) -> str:
-    # Fake, non-resolvable internal host — a connection attempt just fails
-    # (no real backend to exploit); reuse detection relies on the value
-    # reappearing elsewhere (SPEC §5).
+    # Fake, non-resolvable internal host. A connection attempt just fails,
+    # since there is no real backend to exploit, and reuse detection relies on
+    # the value reappearing elsewhere (SPEC §5).
     return f"postgres://app:{tok[:12]}@db.internal-prod.local:5432/app"
 
 
@@ -95,9 +95,9 @@ def google_api_key(tok: str, catcher_url: str | None) -> str:
 
 
 def ssh_private_key(tok: str, catcher_url: str | None) -> str:
-    # PEM-shaped filler that is NOT valid base64/DER — visually matches what
-    # scanners grep for ("BEGIN ... PRIVATE KEY") but cannot be parsed as a
-    # real key by any tool, so it can never be mistaken for a reusable one.
+    # PEM-shaped filler that is NOT valid base64/DER. It matches what scanners
+    # grep for ("BEGIN ... PRIVATE KEY") while being unparseable by any real
+    # tool, so it can never be mistaken for a usable key.
     body = "\n".join(_hex_pad(tok, 64) for _ in range(6))
     return f"-----BEGIN OPENSSH PRIVATE KEY-----\n{body}\n-----END OPENSSH PRIVATE KEY-----\n"
 
@@ -119,7 +119,7 @@ FORMATTERS = {
 
 # Kinds whose formatted value embeds catcher_url directly (a "use" is a GET/POST
 # to that URL, directly observable). Everything else can only be detected via
-# reappearance elsewhere (Authorization headers on other routes) — see SPEC §5.
+# reappearance elsewhere (Authorization headers on other routes). See SPEC §5.
 CATCHER_EMBEDDED = {"slack_webhook"}
 
 # How many leading characters of the token id each kind actually serves as one

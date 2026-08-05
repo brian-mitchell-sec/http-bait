@@ -1,5 +1,9 @@
 # http-bait
 
+[![ci](https://github.com/brian-mitchell-sec/http-
+bait/actions/workflows/ci.yml/badge.svg)](https://github.com/brian-mitchell-
+sec/http-bait/actions/workflows/ci.yml)
+
 An HTTP honeypot built to measure **exploitation** rather than discovery.
 
 > **Research prototype.** This is an instrument for collecting and reasoning about
@@ -36,7 +40,7 @@ absence of attack.
 You can watch that failure mode happen on synthetic data that ships with the repo:
 
 ```bash
-python analyze.py fixtures/sample_events.jsonl --rescan
+python3 analyze.py fixtures/sample_events.jsonl --rescan
 ```
 
 The live pass finds one CVE. Re-applying the current signature set to the same retained
@@ -53,20 +57,27 @@ Locally, app only, bound to loopback:
 ```bash
 docker compose -f docker-compose.local.yml up -d --build
 curl -s http://localhost:8100/.env
-python analyze.py data/logs/http_events.jsonl
+python3 analyze.py 'data/logs/http_events*.jsonl'
 ```
 
 The main `docker-compose.yml` runs Caddy on 80/443 and requests a certificate for the
 hostname in `Caddyfile`, so it is for a real deployment rather than a laptop. It also
 does not publish the app's port, which is why the local file above exists.
 
+A third stack, `docker-compose.nofingerprint.yml`, pairs a stock Caddy image with
+`Caddyfile.nofingerprint`. Use it if you cannot accept the FoxIO License 1.1
+commercial-use restriction on JA4+ fingerprinting (see [NOTICE](NOTICE)), or if you want
+to skip compiling Caddy from source on the target host. `ja4` and `ja4h` are recorded as
+empty strings and nothing else changes.
+
 Tests:
 
 ```bash
-docker run --rm -v "$PWD:/src" -w /src python:3.12-slim sh -c "pip install -q -r app/requirements.txt pytest && cd app && HB_LOG_DIR=/tmp/l python -m pytest -q"
+docker run --rm -v "$PWD:/src" -w /src python:3.12-slim sh -c "pip install -q -r
+app/requirements.txt pytest && cd app && HB_LOG_DIR=/tmp/l python -m pytest -q"
 ```
 
-To put it on the internet — which is the only way it collects anything interesting — see
+To put it on the internet, which is the only way it collects anything interesting, see
 [DEPLOY.md](DEPLOY.md). You need a host with Docker, a DNS name pointing at it, and ports
 80/443 free. A $4–6/month VPS is enough; the service is idle-cheap and there are no API
 costs unless you opt into live canary tokens (below).
@@ -76,16 +87,34 @@ costs unless you opt into live canary tokens (below).
 | Variable | Default | Effect |
 |---|---|---|
 | `HB_LOG_DIR` | `/data/logs` | Where `http_events.jsonl` is written. |
-| `HB_CANARY_BASE` | `https://http-bait.example` | Public base URL embedded in canary URLs. Must be the hostname you actually serve, or callbacks won't reach you. |
+| `HB_CANARY_BASE` | `https://http-bait.example` | Public base URL embedded in
+canary URLs. Must be the hostname you actually serve, or callbacks won't reach
+you. |
 | `HB_LOG_MAX_BYTES` | `209715200` (200MB) | Rotate the live log at this size. |
-| `HB_LOG_KEEP_ROTATED` | `10` | Rotated files to keep. `0` keeps everything — only safe if something else prunes, or the disk will fill and collection will stop. |
-| `HB_HEALTH_MIN_FREE_BYTES` | `536870912` (512MB) | Below this free space, `/healthz` reports unhealthy. |
-| `HB_CANARYTOKENS_LIVE` | unset (off) | Opt in to minting **real** AWS canary keys via canarytokens.org. See below. |
+| `HB_LOG_KEEP_ROTATED` | `10` | Rotated files to keep. `0` keeps everything,
+only safe if something else prunes, or the disk will fill and collection will
+stop. |
+| `HB_HEALTH_MIN_FREE_BYTES` | `536870912` (512MB) | Below this free space,
+`/healthz` reports unhealthy. |
+| `HB_CANARYTOKENS_LIVE` | unset (off) | Opt in to minting **real** AWS canary
+keys via canarytokens.org. See below. |
 | `HB_CANARYTOKENS_REFRESH_SECS` | `86400` | Max age of a minted live key before re-minting. |
-| `HB_CANARYTOKENS_MAX_SERVINGS` | `30` | Max visitors served one live key before re-minting, and therefore the size of the set a real-world trigger narrows to. Clamped to 100. It interacts with the cooldown: `MAX_SERVINGS × 86400 / RETRY_COOLDOWN_SECS` is the ceiling on live servings per day (8,640 at the defaults), so a busier host needs headroom or visitors silently get synthetic keys. The effective values are logged at startup as `canary_config`. |
-| `HB_CANARYTOKENS_RETRY_COOLDOWN_SECS` | `300` | Floor between mint attempts against canarytokens.org. |
-| `HB_OPERATOR_CONTACT` | unset | Address published in `/.well-known/security.txt` and the plugin manifest. Unset means the file says so explicitly rather than naming a placeholder nobody reads. |
-| `HB_WINDOW_LABEL` | `unlabelled` | Tags every record with a collection window. Change it whenever the population changes, and **before publishing anything about a deployment**: readers arriving from a writeup are not organic scanner traffic, and mixing them invalidates every rate. `analyze.py --window <label>` then separates them. |
+| `HB_CANARYTOKENS_MAX_SERVINGS` | `30` | Max visitors served one live key
+before re-minting, and therefore the size of the set a real-world trigger
+narrows to. Clamped to 100. It interacts with the cooldown: `MAX_SERVINGS ×
+86400 / RETRY_COOLDOWN_SECS` is the ceiling on live servings per day (8,640 at
+the defaults), so a busier host needs headroom or visitors silently get
+synthetic keys. The effective values are logged at startup as `canary_config`. |
+| `HB_CANARYTOKENS_RETRY_COOLDOWN_SECS` | `300` | Floor between mint attempts
+against canarytokens.org. |
+| `HB_OPERATOR_CONTACT` | unset | Address published in `/.well-
+known/security.txt` and the plugin manifest. Unset means the file says so
+explicitly rather than naming a placeholder nobody reads. |
+| `HB_WINDOW_LABEL` | `unlabelled` | Tags every record with a collection window.
+Change it whenever the population changes, and **before publishing anything
+about a deployment**: readers arriving from a writeup are not organic scanner
+traffic, and mixing them invalidates every rate. `analyze.py --window <label>`
+then separates them. |
 
 ## The one thing that isn't fake
 
@@ -119,7 +148,8 @@ would.
 | `/.well-known/ai-plugin.json` | Plugin manifest pointing at the OpenAPI document |
 | `/openapi.json`, `/swagger.json` | A deliberately synthetic schema, never FastAPI's real one |
 | `/api/v1/system/status` | `getSystemStatus`, logs `api_tool_call_attempt`, returns fake status |
-| `/api/v1/jobs/run` | `runMaintenanceJob`, logs the job name and argument keys, runs nothing and returns 503 |
+| `/api/v1/jobs/run` | `runMaintenanceJob`, logs the job name and argument keys,
+runs nothing and returns 503 |
 
 `analyze.py` reports discovery requests, operation calls, and the chains where the same
 client did both.
@@ -167,7 +197,7 @@ gen_detectors.py        Regenerates DETECTORS.md from the signature tables
 fixtures/               Synthetic log plus the exact report the analyzer prints for it
 Caddyfile               TLS reverse proxy with JA4/JA4H fingerprinting
 docker-compose.yml      caddy + app, for a real deployment
-docker-compose.local.yml App only, loopback, no TLS — for running it on your machine
+docker-compose.local.yml App only, loopback, no TLS, for running it on your machine
 deploy.sh               Push to a host and bring the stack up
 pull-telemetry.sh       Fetch logs back for offline analysis
 SPEC.md                 Design spec: what each piece is for, which constraints are load-bearing

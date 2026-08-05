@@ -1,5 +1,11 @@
 """Verification for the pre-release fixes. Run inside the app/ dir."""
-import contextlib, json, os, subprocess, sys, time, pathlib
+import contextlib
+import json
+import os
+import subprocess
+import sys
+import time
+import pathlib
 import pytest
 from fastapi.testclient import TestClient
 
@@ -25,7 +31,7 @@ def events(kind=None):
     p = LOGDIR / "http_events.jsonl"
     if not p.exists():
         return []
-    rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
     return [r for r in rows if kind is None or r.get("event") == kind]
 
 
@@ -106,7 +112,8 @@ def test_scan_cost_is_independent_of_issued_count():
 
     Best-of-N rather than total, so one descheduled sample cannot set the result.
     """
-    import main, asyncio
+    import main
+    import asyncio
 
     body = b"A" * 60_000
     headers = {"user-agent": "scan-cost-probe"}
@@ -188,7 +195,8 @@ def test_healthz_reports_write_failure():
 
 def test_client_disconnect_still_logs_request():
     """A body read that dies mid-stream must not lose the request record."""
-    import main, asyncio
+    import main
+    import asyncio
     from starlette.requests import ClientDisconnect
 
     class FakeReq:
@@ -208,7 +216,7 @@ def test_db_password_reuse_now_detected():
     c.get("/.env")
     issued = events("honeytoken_issued")
     dbp = [e for e in issued if e.get("kind") == "db_password"]
-    assert dbp, f"no db_password issued; kinds seen: {set(e.get('kind') for e in issued)}"
+    assert dbp, f"no db_password issued; kinds seen: { {e.get('kind') for e in issued} }"
     tok = dbp[-1]["token"]
     served = tok[:12]
     assert len(served) == 12
@@ -230,7 +238,8 @@ def test_struts_s2_057_signatures_fire():
 
 
 def test_duplicate_header_payload_is_scanned():
-    import main, signatures
+    import main
+    import signatures
     raw = [["referer", "harmless"], ["referer", "${jndi:ldap://x/a}"]]
     text = main._headers_haystack(raw)
     hit = any(cve == "CVE-2021-44228" and pat.search(text)
@@ -343,7 +352,8 @@ def test_reuse_detected_while_rate_limited():
 
 def test_oversized_body_retains_leading_bytes():
     """A single oversized chunk used to discard the whole body, not the excess."""
-    import main, asyncio
+    import main
+    import asyncio
 
     class OneBigChunk:
         async def stream(self):
@@ -436,7 +446,8 @@ def _import_analyze():
 
 def test_signature_tables_are_not_duplicated():
     """analyze.py and main.py drifted because each had its own copy."""
-    import main, signatures
+    import main
+    import signatures
     analyze = _import_analyze()
     assert analyze.CVE_SIGNATURES is signatures.CVE_SIGNATURES
     assert analyze.ROUTE_VARIANT is signatures.ROUTE_VARIANT
@@ -460,7 +471,7 @@ def test_analyzer_output_matches_published_fixture():
     assert got == expected, (
         "analyzer output drifted from fixtures/expected_analysis.txt.\n"
         "If the change is intended, regenerate with:\n"
-        "  python analyze.py fixtures/sample_events.jsonl --rescan > fixtures/expected_analysis.txt"
+        "  python3 analyze.py fixtures/sample_events.jsonl --rescan > fixtures/expected_analysis.txt"
     )
     print("  analyzer reproduces the frozen fixture report exactly")
 
@@ -644,8 +655,8 @@ def test_analyzer_separates_exploits_from_probes():
     assert "payload-bearing exploit attempts" in out
     assert "vulnerability probes (path/marker only)" in out
     rescan = out.split("RESCAN")[1]
-    exploit_line = [l for l in rescan.splitlines() if "payload-bearing" in l][0]
-    probe_line = [l for l in rescan.splitlines() if "vulnerability probes" in l][0]
+    exploit_line = next(x for x in rescan.splitlines() if "payload-bearing" in x)
+    probe_line = next(x for x in rescan.splitlines() if "vulnerability probes" in x)
     assert "3 hit(s)" in exploit_line, exploit_line
     assert "2 hit(s)" in probe_line, probe_line
     print("  rescan reports 3 exploit attempts and 2 probes rather than a combined 5")
@@ -669,7 +680,7 @@ def test_exclude_ip_reaches_issuances_and_reuse():
 
 
 def test_analyzer_does_not_print_raw_payloads_by_default():
-    import main, tempfile
+    import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
         fh.write(json.dumps({
             "ts": "2026-07-20T00:00:00+00:00", "event": "request", "window": "w",

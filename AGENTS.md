@@ -30,7 +30,7 @@ cd app && HB_LOG_DIR=/tmp/l1 python -m pytest test_main.py -q
 cd app && HB_LOG_DIR=/tmp/l2 python -m pytest test_regressions.py -q
 
 # analyze a log
-python analyze.py data/logs/http_events.jsonl [--baseline OLD.jsonl] [--rdns] [--enrich]
+python3 analyze.py data/logs/http_events.jsonl [--baseline OLD.jsonl] [--rdns] [--enrich]
 
 # deploy / fetch telemetry
 ./deploy.sh <host_ip> <hostname>
@@ -40,7 +40,7 @@ python analyze.py data/logs/http_events.jsonl [--baseline OLD.jsonl] [--rdns] [-
 ## Layout
 
 ```
-app/main.py             routes, telemetry middleware, honeytoken minting, CVE signatures
+app/main.py             routes, telemetry middleware, honeytoken minting
 app/formatters.py       per-kind fake-secret generators (pure functions of a token id)
 app/signatures.py       detection tables, imported by BOTH main.py and analyze.py
 app/test_main.py        behaviour tests
@@ -56,7 +56,7 @@ data/logs/              runtime output; gitignored, never committed
 Environment variables are documented in README.md's configuration table. Every one is read
 in `app/main.py`; if you add one, add it to that table in the same change.
 
-## Hard constraints — do not violate
+## Hard constraints, do not violate
 
 - **Nothing executes.** No route may run a command, query a database, fetch a URL, or make
   any outbound request on a caller's behalf. Routes that *look* like they do (`/api/run-job`,
@@ -65,7 +65,7 @@ in `app/main.py`; if you add one, add it to that table in the same change.
   into an SSRF/RCE proxy pointed at the internet.
 - **The one permitted outbound call** is minting a canary token from canarytokens.org, and
   only when `HB_CANARYTOKENS_LIVE=1`. It is part of constructing the bait, not an action
-  taken for a caller — the caller never influences what is requested. Do not add a second
+  taken for a caller, the caller never influences what is requested. Do not add a second
   outbound call, and do not gate any outbound call on attacker-supplied input.
 - **Do not weaken the canarytokens caps.** `HB_CANARYTOKENS_MAX_SERVINGS` bounds how many
   visitors could be responsible for a single real-world trigger, which is what makes an
@@ -73,7 +73,7 @@ in `app/main.py`; if you add one, add it to that table in the same change.
   a third party's free service. Neither is a performance knob.
 - **Never retain visitor credentials.** Values sprayed at login lures are frequently real
   credentials stolen from third parties. Redaction is enforced in the MIDDLEWARE, for
-  every request, via `infer_credential_submission` — not per handler. It used to be per
+  every request, via `infer_credential_submission`, not per handler. It used to be per
   handler, only four handlers called it, and every credential POSTed anywhere else was
   written to the log verbatim. Do not move this back into the route layer, do not
   "improve" it by capturing values, and do not print the legacy raw values that old log
@@ -115,17 +115,17 @@ in `app/main.py`; if you add one, add it to that table in the same change.
 - **Telemetry must not fail silently.** `JsonlWriter.write` deliberately swallows write
   errors so a full disk cannot take the service down, which means `/healthz` is the only
   thing standing between "collecting" and "up but recording nothing." Keep the writer's
-  error counters wired to `/healthz`, and keep the rotation pruning — without it the disk
+  error counters wired to `/healthz`, and keep the rotation pruning, without it the disk
   fills and collection stops with no outward symptom.
 - **Do not log the internal healthcheck.** The container polls `/healthz` from loopback
   every 60s; logging it would swamp a dataset that sees a few hundred real requests a day.
   The middleware skips `/healthz` requests that arrive without `X-Forwarded-For`; requests
   through Caddy still get logged.
-- **`/healthz` must not leak operator detail** — disk figures, failure counts, versions.
+- **`/healthz` must not leak operator detail**, disk figures, failure counts, versions.
   Its body is `{"ok": bool}` and nothing else. It is reachable from the internet.
 - **Keep CVE signature scopes honest.** `check_attack_patterns` matches each signature
   against a named haystack (`path`, `body`, `content-type`, `headers`, `any`). Header
-  matching uses *all* header occurrences, not first-wins — scanners repeat headers to
+  matching uses *all* header occurrences, not first-wins, scanners repeat headers to
   hide payloads. Attribution (`rec["ip"]`, `rec["headers"]`) stays first-wins.
 - **Add a regression test for any detector you fix.** Two signatures in this repository
   were dead on arrival and nothing caught it, because a regex that never matches looks
@@ -156,7 +156,7 @@ exist to keep documentation honest: the analyzer's output against
 deployment's data one `git add -A` away from being published. The same suffix applies to
 any other operator-specific document you produce.
 
-Never populate a findings report from `fixtures/` — that data is synthetic and exists to
+Never populate a findings report from `fixtures/`, that data is synthetic and exists to
 test the analyzer. Never carry another deployment's numbers into a fork.
 
 1. Confirm the collection window is closed. `HB_WINDOW_LABEL` must not have been
@@ -167,7 +167,7 @@ test the analyzer. Never carry another deployment's numbers into a fork.
 3. Generate the report:
 
    ```bash
-   python analyze.py <log> --rescan --window <label> --exclude-ip <self-test ip>
+   python3 analyze.py 'data/logs/http_events*.jsonl' --rescan --window <label> --exclude-ip <self-test ip>
    ```
 
 4. Paste that output into `FINDINGS.local.md`'s Summary block verbatim. Do not hand-edit numbers into

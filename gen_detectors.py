@@ -5,12 +5,23 @@ count is only comparable across a window in which the signature existed for the
 whole window. Keeping the timeline in a hand-written document guarantees it goes
 stale, so it is generated, and CI diffs it.
 
-  python gen_detectors.py > DETECTORS.md
+  python3 gen_detectors.py          # writes DETECTORS.md in place
+  python3 gen_detectors.py --stdout # print instead, for diffing
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "app"))
+
+# Writes DETECTORS.md in place. It used to print to stdout while the README and
+# AGENTS.md both said it regenerated the file, so anyone adding a signature saw
+# a wall of markdown, assumed they were done, and failed CI.
+_LINES: list[str] = []
+
+
+def emit(text: str = "") -> None:
+    _LINES.append(text)
+
 from signatures import CVE_SIGNATURES, TOOL_INVOCATION_SIGNATURES  # noqa: E402
 from formatters import SERVED_TOKEN_LEN, MIN_SERVED_TOKEN_LEN  # noqa: E402
 
@@ -22,7 +33,7 @@ SCOPES = {
     "any": "path, query, body and Content-Type",
 }
 
-print("""# Detectors
+emit("""# Detectors
 
 Generated from `app/signatures.py` by `gen_detectors.py`. Do not edit by hand.
 
@@ -41,36 +52,36 @@ both, with the `since` value beside each row.
   one. Reconcile against the development history before citing a timeline.
 """)
 
-print("## CVE and exploit signatures\n")
-print("`kind` separates payload-bearing attempts from path probes. Reaching")
-print("/vendor/phpunit/.../eval-stdin.php with no body is a scanner checking")
-print("whether PHPUnit is installed; the exploit needs PHP in the request body.")
-print("Report the two counts separately.\n")
-print("| id | kind | scope | since |")
-print("|---|---|---|---|")
+emit("## CVE and exploit signatures\n")
+emit("`kind` separates payload-bearing attempts from path probes. Reaching")
+emit("/vendor/phpunit/.../eval-stdin.php with no body is a scanner checking")
+emit("whether PHPUnit is installed; the exploit needs PHP in the request body.")
+emit("Report the two counts separately.\n")
+emit("| id | kind | scope | since |")
+emit("|---|---|---|---|")
 for cve_id, _pattern, where, since, kind in CVE_SIGNATURES:
-    print(f"| `{cve_id}` | **{kind}** | {SCOPES.get(where, where)} | {since} |")
+    emit(f"| `{cve_id}` | **{kind}** | {SCOPES.get(where, where)} | {since} |")
 
-print("\n## Tool-invocation signatures\n")
-print("These parse an already-bounded request. Nothing is evaluated, imported,")
-print("executed, or fetched.\n")
-print("| tool |")
-print("|---|")
+emit("\n## Tool-invocation signatures\n")
+emit("These parse an already-bounded request. Nothing is evaluated, imported,")
+emit("executed, or fetched.\n")
+emit("| tool |")
+emit("|---|")
 for tool, _pattern in TOOL_INVOCATION_SIGNATURES:
-    print(f"| `{tool}` |")
+    emit(f"| `{tool}` |")
 
-print("\n## Honeytoken geometry\n")
-print("How many leading characters of the token id each kind serves as one")
-print("contiguous run. The reuse detector scans at the minimum, so a kind that")
-print(f"serves a shorter run widens the scan automatically. Current minimum: "
+emit("\n## Honeytoken geometry\n")
+emit("How many leading characters of the token id each kind serves as one")
+emit("contiguous run. The reuse detector scans at the minimum, so a kind that")
+emit(f"serves a shorter run widens the scan automatically. Current minimum: "
       f"**{MIN_SERVED_TOKEN_LEN}**.\n")
-print("| kind | served run |")
-print("|---|---|")
+emit("| kind | served run |")
+emit("|---|---|")
 for kind, n in sorted(SERVED_TOKEN_LEN.items()):
     flag = "  <- sets the scan width" if n == MIN_SERVED_TOKEN_LEN else ""
-    print(f"| `{kind}` | {n}{flag} |")
+    emit(f"| `{kind}` | {n}{flag} |")
 
-print("""
+emit("""
 ### Why this table exists
 
 The reuse detector originally matched only the full 16-character id. Two kinds
@@ -82,3 +93,19 @@ enforced the assumption, so nothing caught it.
 `app/test_regressions.py::test_served_token_len_declarations_are_accurate`
 now checks every number above against what the formatter actually emits.
 """)
+
+
+def main() -> int:
+    text = "\n".join(_LINES) + "\n"
+    if "--stdout" in sys.argv:
+        sys.stdout.write(text)
+        return 0
+    target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DETECTORS.md")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    sys.stderr.write(f"wrote {os.path.basename(target)} ({len(_LINES)} lines)\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

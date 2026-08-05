@@ -1,0 +1,14 @@
+# Deliberately close to defaults. The point is a floor that CI enforces, not a
+# style argument.
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "B", "UP", "C4"]
+ignore = [
+    "E501",  # line length is reported by the formatter, not worth failing CI over
+    "B008",  # FastAPI's Depends() in defaults is the framework idiom
+]
+
+[lint.per-file-ignores]
+"app/test_*.py" = ["B011", "F841"]

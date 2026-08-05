@@ -9,10 +9,13 @@ report from the one the document described. Fill in FINDINGS.md from a labelled
 section below rather than from anything hand-counted.
 
 Usage:
-  python analyze.py data/logs/http_events.jsonl
-  python analyze.py 'data/logs/http_events*.jsonl' --rescan
-  python analyze.py data/logs/http_events.jsonl --baseline .../http_events.prev.jsonl
-  python analyze.py data/logs/http_events.jsonl --exclude-ip 203.0.113.7
+  python3 analyze.py 'data/logs/http_events*.jsonl' --rescan
+  python3 analyze.py 'data/logs/http_events*.jsonl' --exclude-ip 203.0.113.7
+  python3 analyze.py data/logs/http_events.jsonl --baseline .../http_events.prev.jsonl
+
+Prefer the glob. Rotation renames the live file, so the singular name reads one
+segment and reports a smaller number with no sign that anything is missing. The
+tool warns when it spots rotated siblings it was not given.
 
 --rescan re-applies the CURRENT signature set to retained request records,
 which is the only way to compare traffic that arrived before a signature
@@ -43,13 +46,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "app
 from signatures import (  # noqa: E402
     CVE_SIGNATURES,
     INDIRECT_COMMAND_RE,
-    ROOT_ROTATION_PERIOD_DAYS,
-    ROOT_VARIANT_CYCLE,
     ROUTE_VARIANT,
     RSC_PROTOTYPE_RE,
     TOKEN_ID_LEN,
     TOOL_INVOCATION_SIGNATURES,
-    root_variant_at,
+    root_variant_at
 )
 
 socket.setdefaulttimeout(2.0)
@@ -276,8 +277,27 @@ def load_rows(paths):
         if not matched:
             print(f"no such file: {pattern}", file=sys.stderr)
         files.extend(matched)
+    # Rotation renames the live file to http_events.<stamp>.jsonl. Analyzing the
+    # singular name after a rotation reads one segment and reports a plausible,
+    # smaller number with no indication anything is missing, which is exactly the
+    # failure this project exists to argue against.
+    unread = []
     for path in files:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        stem, ext = os.path.splitext(path)
+        siblings = sorted(glob(f"{stem}.*{ext}"))
+        unread.extend(s for s in siblings if s not in files)
+    if unread:
+        print(f"WARNING: {len(unread)} rotated log(s) in the same directory were "
+              f"NOT read:", file=sys.stderr)
+        for u in unread[:5]:
+            print(f"  {os.path.basename(u)}", file=sys.stderr)
+        if len(unread) > 5:
+            print(f"  ... and {len(unread) - 5} more", file=sys.stderr)
+        print("  Re-run with a glob to include them, e.g. "
+              "'data/logs/http_events*.jsonl'", file=sys.stderr)
+
+    for path in files:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.strip():
                     continue
@@ -465,7 +485,7 @@ def main():
         info["with_body"] += 1 if r.get("body_present") else 0
         ts = r.get("ts", "")
         info["first"] = min(info["first"], ts) if info["first"] else ts
-    print_cve_table("CVE hits — LIVE (what the deployed signatures flagged at the time):",
+    print_cve_table("CVE hits, LIVE (what the deployed signatures flagged at the time):",
                     live, since_by_cve, kind_by_cve)
 
     print("\ncve_pattern_match by advertised-version variant:")
@@ -490,7 +510,7 @@ def main():
                     info["with_body"] += 1 if has_body else 0
                     ts = r.get("ts", "")
                     info["first"] = min(info["first"], ts) if info["first"] else ts
-        print_cve_table("CVE hits — RESCAN (current signatures re-applied to retained records):",
+        print_cve_table("CVE hits, RESCAN (current signatures re-applied to retained records):",
                         rescan, since_by_cve, kind_by_cve)
         print("   NOTE: a rescan sees only what was retained. Request bodies are")
         print("   capped and only a 4KB excerpt is stored, and sensitive headers")
@@ -503,7 +523,7 @@ def main():
     print(f"confirmed triggers (issued ids only): {len(triggered)}")
     print(f"unissued /x/ probes (NOT proof of use): {len(unissued_probes)}")
     if evictions:
-        print(f"   WARNING: {len(evictions)} index eviction(s) recorded — tokens issued")
+        print(f"   WARNING: {len(evictions)} index eviction(s) recorded, tokens issued")
         print("   before an eviction cannot be matched, so any null below is bounded by it.")
 
     print("\nissuance by kind:")
@@ -530,7 +550,7 @@ def main():
     for tok in issued_by_tok:
         prefix_index.setdefault(tok[:TOKEN_PREFIX_LEN], tok)
 
-    hex_run_re = re.compile(r"[0-9a-f]{%d,}" % TOKEN_PREFIX_LEN)
+    hex_run_re = re.compile(rf"[0-9a-f]{{{TOKEN_PREFIX_LEN},}}")
     reuse_hits = []
     for r in reqs:
         blob = " ".join([json.dumps(r.get("headers", {})),

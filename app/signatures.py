@@ -51,13 +51,13 @@ ROUTE_VARIANT = {
     "/phpmyadmin/": "wordpress", "/phpmyadmin/index.php": "wordpress",
     "/admin": "struts", "/admin/login": "struts",
     "/actuator/env": "spring", "/actuator/health": "spring",
-    # Permanently-pinned parallel variants (2026-07 addition) — see the
+    # Permanently-pinned parallel variants (2026-07 addition), see the
     # "Landing page(s)" section of app/main.py for why these run alongside
     # "/"'s existing rotation instead of replacing it.
     "/app": "wordpress", "/site": "struts", "/legacy": "spring",
-    # "/" rotates across all three (SPEC §4.3 "rotate periodically") — see
+    # "/" rotates across all three (SPEC §4.3 "rotate periodically"), see
     # root_variant_at() below.
-    # "/debug", "/debug/vars" carry NO banner on purpose — their body is
+    # "/debug", "/debug/vars" carry NO banner on purpose, their body is
     # Go-expvar-shaped (cmdline/memstats), and real Go net/http servers don't
     # set a Server header by default, so silence here is itself consistent
     # signal rather than a mismatch with a Spring/WordPress/Struts banner.
@@ -100,9 +100,9 @@ def root_variant_at(ts: datetime) -> str:
 #
 # Each entry also declares a KIND:
 #
-#   "exploit" — the pattern matches attacker-supplied payload. A hit is an
+#   "exploit", the pattern matches attacker-supplied payload. A hit is an
 #               attempt to exploit, not merely to look.
-#   "probe"   — the pattern matches a path or a generic marker and nothing more.
+#   "probe", the pattern matches a path or a generic marker and nothing more.
 #               Reaching the endpoint is reconnaissance. CVE-2017-9841 needs PHP
 #               in the request body to do anything, and CVE-2024-27956 needs its
 #               SQL payload; a bare GET to either path is a scanner checking
@@ -129,7 +129,7 @@ CVE_SIGNATURES = [
     # (`redirect:${233*233}`, `redirectAction:${...}`), and the RCE variant
     # spells it `ognl.OgnlContext` with a dot, not `ognl:`. The previous
     # pattern required `${` first and a trailing colon, so it matched none of
-    # the shapes actually seen in the wild — a detector that could never fire.
+    # the shapes actually seen in the wild, a detector that could never fire.
     ("CVE-2018-11776", re.compile(r"(redirect(action)?:|@?ognl[.:])", re.I), "path", "unknown", "exploit"),
     # Spring Framework HttpInvoker deserialization. The advertised Spring Boot
     # banner is what draws these; the probe itself targets the remoting
@@ -144,8 +144,7 @@ CVE_SIGNATURES = [
     # an unrelated payload). The pattern is unchanged, so historical counts
     # carry over; only the id it reports under is corrected.
     ("WP-XMLRPC-PINGBACK", re.compile(r"wp_ajax|multicall|pingback\.ping", re.I), "any", "initial", "probe"),
-    # wp-file-manager unauthenticated upload/RCE (connector endpoint probe) —
-    # the flaw CVE-2020-25213 actually refers to.
+    # wp-file-manager unauthenticated upload/RCE (connector endpoint probe), # the flaw CVE-2020-25213 actually refers to.
     ("CVE-2020-25213", re.compile(r"wp-file-manager|filemanager/lib/php/connector", re.I), "any", "2026-08-03", "probe"),
     # Log4Shell: sprayed into ANY header (User-Agent, X-Api-Version, Referer, …)
     # by real-world scanners regardless of advertised stack, so it is not gated
@@ -153,7 +152,7 @@ CVE_SIGNATURES = [
     # path/query/body only, which missed the header-sprayed shape that is how
     # this actually arrives; rescoped to headers 2026-07-11.
     ("CVE-2021-44228", re.compile(r"\$\{jndi:", re.I), "headers", "2026-07-11", "exploit"),
-    # PHPUnit eval-stdin.php RCE — the path alone is the exploit. A generic,
+    # PHPUnit eval-stdin.php RCE, the path alone is the exploit. A generic,
     # stack-agnostic probe like Log4Shell, commonly seen riding along in
     # round-robin scan bursts. Added after the first release; the exact date is
     # not recoverable from this repository.
@@ -214,7 +213,7 @@ SENSITIVE_HEADERS = {
 
 # Body field names that indicate a credential submission. Used to redact
 # credential-shaped POST bodies on routes that are NOT one of the registered
-# panel handlers — see main.py's infer_credential_submission(). Matched
+# panel handlers, see main.py's infer_credential_submission(). Matched
 # case-insensitively against form field names and JSON keys.
 CREDENTIAL_FIELD_NAMES = {
     "password", "passwd", "pwd", "pass", "pw",

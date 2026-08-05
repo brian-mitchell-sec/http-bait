@@ -8,9 +8,10 @@
 # wants. This file is that path.
 #
 # Do NOT deploy this one. There is no TLS, no reverse proxy, and therefore no
-# JA4/JA4H fingerprinting and no X-Forwarded-For, so every record it writes has
-# an empty client IP. It exists to let you run the routes and the analyzer on a
-# machine you already trust.
+# JA4/JA4H fingerprinting and no X-Forwarded-For. Every record it writes carries
+# the Docker bridge gateway address (typically 172.x.x.x) as the client, which
+# looks like a real address and means nothing. It exists to let you run the
+# routes and the analyzer on a machine you already trust.
 services:
   app:
     build: .
