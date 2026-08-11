@@ -62,6 +62,18 @@ jobs:
           python -m venv /tmp/bare
           /tmp/bare/bin/python analyze.py fixtures/sample_events.jsonl > /dev/null
 
+      - name: HB_CANARY_BASE placeholder is consistent everywhere
+        # deploy.sh rewrites exactly one placeholder string. The README's config
+        # table, both compose files, and the code default in main.py must carry
+        # that same string, or the docs describe a placeholder the deploy
+        # scripts do not replace.
+        run: |
+          PH="https://http-bait.example.com"
+          grep -qF "| \`HB_CANARY_BASE\` | \`$PH\`" README.md
+          grep -qF "HB_CANARY_BASE=$PH" docker-compose.yml
+          grep -qF "HB_CANARY_BASE=$PH" docker-compose.nofingerprint.yml
+          grep -qF "HB_CANARY_BASE\", \"$PH\")" app/main.py
+
   build:
     runs-on: ubuntu-latest
     steps:

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.3, 2026-08-11
 
 Fixes from an external adversarial review of the repository itself. Each is in
 a failure class this project claims to hunt, which is exactly why they matter.
@@ -47,6 +47,16 @@ a failure class this project claims to hunt, which is exactly why they matter.
   URL had a literal newline in it and rendered as broken text; the README now
   shows the live-vs-rescan fixture output instead of only describing it, and
   links the sister MCP project.
+- **One placeholder, everywhere.** The `HB_CANARY_BASE` code default was
+  `https://http-bait.example` while the compose files, the Caddyfile and
+  deploy.sh's rewrite pattern all used `https://http-bait.example.com`, and the
+  README's configuration table documented the code value. The code default and
+  the README now use the deploy placeholder, so there is exactly one string for
+  deploy.sh to rewrite and one for an operator to recognize. A CI step greps
+  all four locations against it, because doc-drift detection is already this
+  workflow's job.
+
+Tests 55 to 64.
 
 ## v0.1.2, 2026-08-04
 

@@ -104,7 +104,7 @@ costs unless you opt into live canary tokens (below).
 | Variable | Default | Effect |
 |---|---|---|
 | `HB_LOG_DIR` | `/data/logs` | Where `http_events.jsonl` is written. |
-| `HB_CANARY_BASE` | `https://http-bait.example` | Public base URL embedded in
+| `HB_CANARY_BASE` | `https://http-bait.example.com` | Public base URL embedded in
 canary URLs. Must be the hostname you actually serve, or callbacks won't reach
 you. |
 | `HB_LOG_MAX_BYTES` | `209715200` (200MB) | Rotate the live log at this size. |

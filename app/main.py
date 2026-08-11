@@ -51,7 +51,7 @@ from signatures import (
 LOG_DIR = Path(os.environ.get("HB_LOG_DIR", "/data/logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 EVENTS = LOG_DIR / "http_events.jsonl"
-CANARY_BASE = os.environ.get("HB_CANARY_BASE", "https://http-bait.example")
+CANARY_BASE = os.environ.get("HB_CANARY_BASE", "https://http-bait.example.com")
 
 BODY_CAP = 64_000          # hard cap on stored/read request body bytes (SPEC §2 non-goal: not a DoS amplifier)
 BODY_EXCERPT_CAP = 4_000   # logged excerpt cap (SPEC §6)
